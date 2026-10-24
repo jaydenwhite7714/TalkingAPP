@@ -135,7 +135,8 @@ export function load() {
     s.defaultChannelId = s.channelIds.includes(s.defaultChannelId) ? s.defaultChannelId : s.channelIds[0];
     s.networkKey = s.networkKey || networkKeyFor(s.name);
   }
-  state.ui.activeServerId = state.servers[saved.ui?.activeServerId] ? saved.ui.activeServerId : null;
+  const savedServer = saved.ui?.activeServerId;
+  state.ui.activeServerId = savedServer === '@me' ? '@me' : (state.servers[savedServer] ? savedServer : null);
   state.ui.activeChannelId = state.channels[saved.ui?.activeChannelId] ? saved.ui.activeChannelId : null;
   state.ui.lastChannelByServer = saved.ui?.lastChannelByServer || {};
   state.ui.membersOpen = state.settings.showMembers;
@@ -144,8 +145,8 @@ export function load() {
     const first = firstServerId();
     if (first) state.ui.activeServerId = first;
   }
-  if (!state.ui.activeChannelId && state.ui.activeServerId) {
-    state.ui.activeChannelId = state.servers[state.ui.activeServerId].defaultChannelId;
+  if (!state.ui.activeChannelId && state.ui.activeServerId && state.ui.activeServerId !== '@me') {
+    state.ui.activeChannelId = state.servers[state.ui.activeServerId]?.defaultChannelId || null;
   }
 
   for (const m of Object.values(state.messages)) {
@@ -771,7 +772,7 @@ export function pruneTyping() {
 /* -------------------------------- presence ------------------------------- */
 
 export function setPresence(userId, status) {
-  if (!state.presence[userId] === status) return;
+  if (!userId || state.presence[userId] === status) return;
   state.presence[userId] = status;
   bus.emit('presence:changed');
 }

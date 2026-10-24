@@ -4,7 +4,7 @@ import {
   receiveMessage, makeMessage, setPresence, setTyping, markRead, toast as storeToast,
   registerAllCommunities, persistNow, unreadEverywhere, selectChannel, selectServer,
   activeChannel, openDM, ensureDMChannelForUser, applyRemoteReaction, findMessage, editMessage,
-  deleteMessage, networkKeyFor,
+  deleteMessage, networkKeyFor, addMessage,
 } from './store.js';
 import { defaultAvatar } from './avatar.js';
 import { bus } from './bus.js';
@@ -109,8 +109,33 @@ async function startApp() {
 
   wireEvents();
   installShortcuts();
+  handleInviteLink();
   updateTitle();
   setTimeout(() => focusComposer(), 500);
+}
+
+async function handleInviteLink() {
+  const invite = CONFIG.invite;
+  if (!invite?.key) return;
+  const existing = Object.values(state.servers).find((s) => s.networkKey === invite.key);
+  if (existing) {
+    setTimeout(() => goToServer(existing.id), 700);
+    return;
+  }
+  const { joinNetworkCommunity } = await import('./store.js');
+  const res = joinNetworkCommunity({ name: invite.name.replace(/-/g, ' '), key: invite.key, channels: ['general'] });
+  if (res.ok) {
+    setTimeout(() => {
+      goToServer(res.server.id);
+      toast(`You joined ${res.server.name}`, 'party', { duration: 3200 });
+      net.requestHistory({ serverKey: invite.key });
+    }, 900);
+  }
+  // keep the URL clean so a refresh doesn't re-trigger the join
+  const url = new URL(location.href);
+  url.searchParams.delete('join');
+  url.searchParams.delete('name');
+  history.replaceState(null, '', url.pathname + url.search + location.hash);
 }
 
 function startNetwork() {
@@ -234,6 +259,18 @@ function wireEvents() {
   });
 
   /* ---- incoming ---- */
+  // the network layer re-emits envelopes as net:<kind>; connect them to the handlers below
+  bus.on('net:peer', ({ peer }) => applyPeer(peer));
+  bus.on('net:join', ({ peer }) => applyPeer(peer));
+  bus.on('net:leave', ({ userId }) => {
+    removePeer(userId);
+    delete state.presence[userId];
+    removeTypingFor(userId);
+    bus.emit('presence:changed');
+  });
+  bus.on('net:tick', expireTyping);
+  bus.on('net:presence', ({ peer }) => applyPeer(peer));
+
   bus.on('net:chat', (p) => {
     const ch = resolveIncomingChannel(p);
     const from = p.from;
@@ -344,7 +381,8 @@ function wireEvents() {
       state.messages[ch.id].sort((x, y) => x.ts - y.ts);
       persistNow();
       if (ch.id === state.ui.activeChannelId) openChannelView(ch.id);
-      bus.emit('message:new', { channelId: ch.id, message: state.messages[ch.id].at(-1) });
+      else bus.emit('reads:changed', ch.id);
+      bus.emit('messages:synced', { channelId: ch.id });
     }
   });
 
@@ -387,24 +425,7 @@ function wireEvents() {
     deleteMessage(ch.id, p.msgId);
   });
 
-  bus.on('net:presence', ({ peer }) => {
-    applyPeer(peer);
-  });
-  bus.on('net:join', ({ peer }) => {
-    applyPeer(peer);
-    if (peer?.user?.id !== state.self?.id && peer?.user?.displayName) {
-      // gentle presence ping
-    }
-  });
-  bus.on('net:leave', ({ userId }) => {
-    removePeer(userId);
-    delete state.presence[userId];
-    removeTypingFor(userId);
-    bus.emit('presence:changed');
-  });
-
   bus.on('net:status', ({ status, transports, peers }) => {
-    if (status === 'online') clearQueuedFlags();
     const prev = state.ui.connection;
     state.ui.connection = status;
     bus.emit('connection:changed', { status, transports, peers });
@@ -416,26 +437,6 @@ function wireEvents() {
     }
   });
 
-  bus.on('net:peer', ({ peer }) => {
-    if (!peer?.user) return;
-    const existing = state.users[peer.user.id];
-    if (!existing || JSON.stringify(existing) !== JSON.stringify({ ...existing, ...peer.user })) {
-      state.users[peer.user.id] = { ...(existing || {}), ...peer.user };
-    }
-  });
-
-  bus.on('net:tick', () => {
-    // expire stale typing indicators
-    const now = Date.now();
-    for (const [cid, map] of Object.entries(state.typing)) {
-      for (const [uid, v] of Object.entries(map)) {
-        if (v.until <= now) {
-          delete map[uid];
-          bus.emit('typing:changed', cid);
-        }
-      }
-    }
-  });
 
   bus.on('settings:changed', ({ key }) => {
     applySettings();
@@ -504,6 +505,18 @@ function applyPeer(peer) {
   bus.emit('net:presence-applied');
 }
 
+function expireTyping() {
+  const now = Date.now();
+  for (const [cid, map] of Object.entries(state.typing)) {
+    for (const [uid, v] of Object.entries(map)) {
+      if (v.until <= now) {
+        delete map[uid];
+        bus.emit('typing:changed', cid);
+      }
+    }
+  }
+}
+
 function removeTypingFor(userId) {
   for (const [cid, map] of Object.entries(state.typing)) {
     if (map[userId]) {
@@ -541,9 +554,16 @@ function promptJoin(p) {
 function notifyIncoming(ch, msg) {
   if (!msg || msg.isSelf) return;
   const isActive = ch.id === state.ui.activeChannelId && !document.hidden;
+  const mentioned = new RegExp(`@${state.self?.handle}\\b`, 'i').test(msg.text || '') || /@everyone\b/i.test(msg.text || '');
   if (!isActive && state.settings.sounds) playPop();
+  if (!isActive && mentioned) {
+    const where = ch.type === 'dm' ? 'a direct message' : `#${ch.name}`;
+    toast(`${msg.displayName} mentioned you in ${where}`, 'info', {
+      duration: 6000,
+      action: { label: 'Jump', onClick: () => goToChannel(ch.id) },
+    });
+  }
   if (document.hidden) {
-    const mentioned = new RegExp(`@${state.self?.handle}\\b`, 'i').test(msg.text) || /@everyone\b/i.test(msg.text);
     const label = ch.type === 'dm' ? msg.displayName : `#${ch.name} · ${msg.displayName}`;
     if (mentioned || ch.type === 'dm' || state.settings.desktopNotifs) {
       showNotification(label, msg.text.slice(0, 120) || 'New message');
@@ -665,7 +685,11 @@ bus.on('message:new', updateTitle);
 setInterval(() => { if (started) updateTitle(); }, 8000);
 
 /* --------------------------- debug handle (dev) --------------------------- */
-window.__ta = { state, net, bus, config: CONFIG };
+window.__ta = {
+  state, net, bus, config: CONFIG,
+  addMessage, makeMessage, receiveMessage, selectChannel, selectServer, persistNow,
+  revealChannel: (id) => selectChannel(id),
+};
 
 /* ------------------------------- kick off -------------------------------- */
 

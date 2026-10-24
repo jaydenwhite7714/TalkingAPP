@@ -53,7 +53,14 @@ export function initShell() {
   bus.on('net:presence', debounce(() => { renderMembers(); renderSidebar(); }, 120));
   bus.on('drawer:changed', () => appEl.classList.toggle('drawer-open', state.ui.sidebarOpen));
 
+  let wasNarrow = window.matchMedia('(max-width: 1060px)').matches;
   window.addEventListener('resize', debounce(() => {
+    const narrow = window.matchMedia('(max-width: 1060px)').matches;
+    if (narrow !== wasNarrow) {
+      wasNarrow = narrow;
+      // the member list becomes an overlay on narrow screens, so start closed
+      toggleMembers(narrow ? false : state.settings.showMembers !== false, { silent: true });
+    }
     renderMembers();
     if (!window.matchMedia('(max-width: 860px)').matches) toggleDrawer(false);
   }, 120));

@@ -133,6 +133,7 @@
 .msg-avatar { grid-column: 1; display: flex; justify-content: center; padding-top: 2px; }
 .msg-avatar .avatar { cursor: pointer; }
 .msg-body { grid-column: 2; min-width: 0; padding-top: 1px; }
+.message.compact .msg-body { grid-column: 2; }
 .msg-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; line-height: 1.25; margin-bottom: 1px; }
 .msg-author {
   font-size: 15px;
@@ -163,11 +164,12 @@
   transition: opacity var(--dur-1);
 }
 .msg-edited { font-size: 10.5px; color: var(--text-4); }
+.msg-pin-mark { display: inline-flex; color: var(--text-4); }
+.msg-pin-mark svg { transform: rotate(45deg); }
 .msg-text {
   font-size: 15px;
   line-height: 1.45;
   color: var(--text-2);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -303,7 +305,7 @@
 .msg-reply .reply-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 460px; }
 
 /* reactions */
-.reactions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; align-items: center; }
+.reactions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; margin-left: 0; align-items: center; width: fit-content; }
 .reaction {
   display: inline-flex;
   align-items: center;
@@ -383,7 +385,7 @@
 .jump-bottom {
   position: absolute;
   left: 50%;
-  bottom: 14px;
+  bottom: 118px;
   transform: translateX(-50%);
   display: flex;
   align-items: center;

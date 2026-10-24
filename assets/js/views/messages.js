@@ -1,21 +1,20 @@
 // Message list rendering and interactions
 import {
-  el, escapeHtml, formatClock, formatDayLabel, formatMessageStamp, formatRelative, sameDay, cssEsc, copyToClipboard, debounce,
+  el, escapeHtml, formatClock, formatDayLabel, formatMessageStamp, sameDay, cssEsc, copyToClipboard,
 } from '../util.js';
 import { avatarHTML } from '../avatar.js';
 import { icon, iconHTML } from '../icons.js';
-import { renderContent, isEmojiOnly, plainPreview } from '../markdown.js';
+import { renderContent, plainPreview } from '../markdown.js';
 import { emojify } from '../emojis.js';
 import {
-  state, toggleReaction, togglePin, deleteMessage, editMessage, findMessage, markRead,
-  activeChannel, toast, sendMessage,
+  state, toggleReaction, togglePin, deleteMessage, findMessage, markRead, toast,
 } from '../store.js';
 import { bus } from '../bus.js';
 import { openMenu, closePopover } from '../ui/menu.js';
 import { openProfileCard } from '../ui/profileCard.js';
 import { openEmojiPicker } from '../ui/emojiPicker.js';
 import { openLightbox } from '../ui/lightbox.js';
-import { promptDialog, confirmDialog } from '../ui/modal.js';
+import { confirmDialog } from '../ui/modal.js';
 import { openDM } from '../store.js';
 
 let scroller = null;
@@ -36,7 +35,6 @@ export function initMessages() {
 
   inner.addEventListener('click', onListClick);
   inner.addEventListener('contextmenu', onListContext);
-  inner.addEventListener('mouseover', onHoverReply);
 
   bus.on('message:new', ({ channelId, message }) => {
     if (channelId !== ctx.channelId) return;
@@ -96,7 +94,7 @@ export function openChannelView(channelId) {
       inner.append(el('div', { class: 'unread-divider', id: 'unread-divider' }, el('span', { text: 'New messages' })));
       unreadInserted = true;
     }
-    const group = !lastMsg || lastMsg.userId !== msg.userId || msg.ts - lastMsg.ts > GROUP_WINDOW || Boolean(msg.replyTo);
+    const group = !lastMsg || lastMsg.userId !== msg.userId || msg.ts - lastMsg.ts > GROUP_WINDOW || Boolean(msg.replyTo) || String(msg.text || '').includes('\n');
     const node = messageNode(msg, { group });
     inner.append(node);
     lastMsg = msg;
@@ -193,6 +191,7 @@ function messageNode(msg, { group = true } = {}) {
       title: formatMessageStamp(msg.ts),
     }));
     if (msg.network) head.append(el('span', { class: 'msg-edited', title: 'Delivered over the TalkingApp network', text: '· network' }));
+    if (msg.pinned) head.append(el('span', { class: 'msg-pin-mark', title: 'Pinned message', html: iconHTML('pin', 12) }));
     body.append(head);
   }
 
@@ -436,10 +435,6 @@ function onListClick(e) {
     return;
   }
 
-  const msgNodeEl = target.closest('.message');
-  if (msgNodeEl && window.matchMedia('(pointer: coarse)').matches) {
-    // long-press style affordance on touch: tapping the row selects nothing special
-  }
 }
 
 function onListContext(e) {
@@ -449,11 +444,6 @@ function onListContext(e) {
   if (!msg) return;
   e.preventDefault();
   messageMenu(msg, e.target);
-}
-
-let hoverTimer = null;
-function onHoverReply(e) {
-  // no-op placeholder for potential hover previews
 }
 
 export function scrollToMessage(id) {
@@ -506,10 +496,3 @@ function renderTyping() {
   );
 }
 
-declareGlobal();
-
-function declareGlobal() {
-  if (typeof window !== 'undefined') {
-    window.addEventListener('ta:typing-tick', renderTyping);
-  }
-}

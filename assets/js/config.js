@@ -12,9 +12,14 @@ function parseCandidates() {
   const override = params.get('relay') || localStorage.getItem('ta.relay.override');
   if (override) {
     for (const raw of override.split(',').map((s) => s.trim()).filter(Boolean)) {
-      if (/^mqtt(s)?:\/\//i.test(raw) || /\/mqtt$/i.test(raw)) out.push({ kind: 'mqtt', url: raw.replace(/^mqtt/i, 'wss') });
-      else if (/^wss?:\/\//i.test(raw)) out.push({ kind: isLocal ? 'raw-ws' : 'raw-ws', url: raw });
-      else if (raw.startsWith('ws+local')) out.push({ kind: 'local' });
+      if (/^mqtts?:\/\//i.test(raw) || /\/mqtt$/i.test(raw)) {
+        // mqtt:// -> ws://, mqtts:// -> wss://
+        out.push({ kind: 'mqtt', url: raw.replace(/^mqtts:\/\//i, 'wss://').replace(/^mqtt:\/\//i, 'ws://') });
+      } else if (/^wss?:\/\//i.test(raw)) {
+        out.push({ kind: 'raw-ws', url: raw });
+      } else if (raw === 'local' || raw.startsWith('ws+local')) {
+        out.push({ kind: 'local' });
+      }
     }
   }
   if (isLocal && params.get('env') !== 'prod') {
@@ -35,6 +40,9 @@ function parseCandidates() {
   return out;
 }
 
+const joinKey = params.get('join') || params.get('server') || '';
+const joinName = params.get('name') || '';
+
 export const CONFIG = {
   appName: 'TalkingApp',
   version: '1.0.0',
@@ -50,6 +58,9 @@ export const CONFIG = {
     issues: 'https://github.com/jaydenwhite7714/TalkingAPP/issues',
   },
   isLocal,
+  invite: joinKey
+    ? { key: joinKey.replace(/[^a-z0-9-]/gi, '').slice(0, 40), name: (joinName || joinKey).slice(0, 40) }
+    : null,
 };
 
 export function usableRelayCandidates() {

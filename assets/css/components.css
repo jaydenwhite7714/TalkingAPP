@@ -236,6 +236,7 @@
 .modal-head h2 { font-size: 20px; font-weight: 750; letter-spacing: -.025em; }
 .modal-head p { margin-top: 5px; font-size: 13.5px; color: var(--text-2); line-height: 1.5; }
 .modal-close { position: absolute; top: 14px; right: 14px; }
+.modal:focus { outline: none; }
 .modal-body { padding: 0 22px 4px; overflow-y: auto; flex: 1 1 auto; }
 .modal-body.pad { padding-top: 6px; }
 .modal-foot {

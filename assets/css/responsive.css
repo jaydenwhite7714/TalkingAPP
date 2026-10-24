@@ -123,7 +123,7 @@
   .chat-intro { padding: 14px 14px 4px; }
   .chat-intro h2 { font-size: 23px; }
   .chat-intro .ci-icon { width: 54px; height: 54px; border-radius: 16px; }
-  .jump-bottom { bottom: 8px; }
+  .jump-bottom { bottom: 104px; }
 }
 
 @media (max-width: 420px) {

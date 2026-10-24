@@ -210,18 +210,30 @@ export function deleteChannelFlow(ch) {
 /* ================================= invite =============================== */
 
 export function openInvite(server) {
-  const url = `${location.origin}${location.pathname}`;
-  const linkRow = el('div', { class: 'share-block' },
-    icon('link', 15),
-    el('span', { text: url }),
+  const base = `${location.origin}${location.pathname}`;
+  const joinUrl = server
+    ? `${base}?join=${encodeURIComponent(server.networkKey)}&name=${encodeURIComponent(server.name)}`
+    : `${base}`;
+
+  const makeRow = (value, label, primary) => el('div', { class: 'share-block', style: { marginBottom: '9px' } },
+    icon(primary ? 'userPlus' : 'link', 15),
+    el('span', { text: value, title: value }),
     el('button', {
-      class: 'btn btn-primary btn-sm', type: 'button',
+      class: `btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-sm`, type: 'button',
       onclick: async (e) => {
-        await copyToClipboard(url);
-        e.currentTarget.lastChild.textContent = 'Copied';
-        toast('Invite link copied', 'ok');
+        await copyToClipboard(value);
+        const span = e.currentTarget.querySelector('span:last-child');
+        if (span) span.textContent = 'Copied';
+        toast(`${label} copied`, 'ok');
       },
     }, icon('copy', 14), el('span', { text: 'Copy' })),
+  );
+
+  const linkRow = el('div', {},
+    server ? el('div', { class: 'section-title', text: 'Server invite — lands them inside this server' }) : null,
+    server ? makeRow(joinUrl, 'Server invite', true) : null,
+    el('div', { class: 'section-title', style: { marginTop: server ? '14px' : '0' }, text: 'Plain link — opens TalkingApp' }),
+    makeRow(base, 'Link', false),
   );
 
   const content = el('div', { class: 'modal-body pad' },
@@ -232,7 +244,7 @@ export function openInvite(server) {
     el('div', { class: 'tip-card' },
       el('div', { class: 'tip-ico' }, icon('wifi', 15)),
       el('div', {}, el('b', { text: 'Send it to a friend' }),
-        el('p', { text: 'Open the link in any browser, on any device. No sign-up email needed.' }))),
+        el('p', { text: 'The plain link works on any device. The server invite puts them straight into this server with its channels.' }))),
     el('div', { class: 'tip-card' },
       el('div', { class: 'tip-ico' }, icon('globe', 15)),
       el('div', {}, el('b', { text: 'Post it in Explore' }),
@@ -246,7 +258,7 @@ export function openInvite(server) {
   const footer = el('div', { class: 'modal-foot' },
     el('button', {
       class: 'btn btn-secondary', type: 'button',
-      onclick: () => window.open(url, '_blank', 'noopener'),
+      onclick: () => window.open(base, '_blank', 'noopener'),
     }, icon('external', 15), 'Open in new tab'),
     el('button', { class: 'btn btn-primary', type: 'button', onclick: () => ref.close() }, 'Done'),
   );
@@ -486,8 +498,9 @@ export function openExplore() {
   const ref = openModal({
     title: 'Explore the network',
     subtitle: 'Everything happening right now across everyone who has TalkingApp open.',
-    content: body, footer, icon: 'compass', size: 'xwide',
+    content: body, footer, icon: 'compass', size: 'xwide', noAutofocus: true,
   });
+  setTimeout(() => search.focus({ preventScroll: true }), 80);
 }
 
 function isJoinedKey(key) {
@@ -555,8 +568,8 @@ export function openSearch(initial = '') {
   render(initial);
 
   const content = el('div', { class: 'modal-body pad' }, input, results);
-  const ref = openModal({ title: 'Search', content, icon: 'search', size: 'wide', hideClose: false });
-  setTimeout(() => input.focus(), 60);
+  const ref = openModal({ title: 'Search', content, icon: 'search', size: 'wide', noAutofocus: true });
+  setTimeout(() => { input.focus(); input.select(); }, 80);
 }
 
 /* ================================= pins ================================ */
@@ -625,7 +638,8 @@ export function openNewDM() {
     el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { ref.close(); openExplore(); } }, icon('compass', 15), 'Explore'),
     el('button', { class: 'btn btn-secondary', type: 'button', onclick: () => ref.close() }, 'Close'),
   );
-  const ref = openModal({ title: 'New message', subtitle: 'Start a private conversation', content, footer, icon: 'at' });
+  const ref = openModal({ title: 'New message', subtitle: 'Start a private conversation', content, footer, icon: 'at', noAutofocus: true });
+  setTimeout(() => input.focus({ preventScroll: true }), 80);
 }
 
 export function closeDM(ch) {
