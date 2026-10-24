@@ -1,0 +1,19 @@
+{
+  "name": "talkingapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TalkingApp — a real-time, Discord-style chat app that runs entirely in the browser and deploys free on GitHub Pages.",
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/serve.mjs",
+    "relay": "node tools/relay/server.mjs",
+    "test": "node tools/test/smoke.mjs"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.3",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,150 @@
+/* ==========================================================================
+   Responsive behaviour
+   ========================================================================== */
+
+/* --- tablets: tighter rail/sidebar, members collapse -------------------- */
+@media (max-width: 1180px) {
+  :root { --sidebar-w: 232px; --members-w: 216px; }
+}
+@media (max-width: 1060px) {
+  .members-panel {
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    width: min(272px, 82vw);
+    z-index: 9;
+    display: none;
+    box-shadow: var(--shadow-lg);
+    animation: slide-in-right var(--dur-3) var(--ease-out);
+  }
+  .members-panel:not(.hidden) { display: block; }
+  @keyframes slide-in-right { from { transform: translateX(14px); opacity: 0 } to { transform: none; opacity: 1 } }
+}
+
+/* --- onboarding stacks ------------------------------------------------- */
+@media (max-width: 1020px) {
+  .onboarding-inner {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 34px;
+    padding-top: 34px;
+    align-items: start;
+    max-width: 620px;
+  }
+  .hero { max-width: none; }
+  .hero h1 { font-size: clamp(40px, 10vw, 58px); }
+  .hero-feats { gap: 14px; }
+  .hero-stats { order: 3; }
+  .signup-card { width: 100%; }
+}
+@media (max-width: 640px) {
+  .onboarding-inner { padding: 22px 16px 40px; gap: 26px; }
+  .hero-brand { margin-bottom: 20px; }
+  .hero h1 { margin-bottom: 16px; }
+  .hero-sub { font-size: 15.5px; margin-bottom: 22px; }
+  .hero-feats li:nth-child(3) { display: none; }
+  .feat-ico { width: 34px; height: 34px; border-radius: 10px; }
+  .signup-card { padding: 20px 16px; border-radius: 20px; }
+  .signup-avatar-row { gap: 12px; padding: 12px; }
+  .signup-avatar-row .avatar-xl { width: 62px; height: 62px; font-size: 24px; }
+  .hero-stats { gap: 14px; }
+  .hero-stats b { font-size: 17px; }
+  .blob { filter: blur(70px); opacity: .38; }
+}
+
+/* --- mobile app shell -------------------------------------------------- */
+@media (max-width: 860px) {
+  :root { --rail-w: 0px; --sidebar-w: 272px; --header-h: 50px; }
+
+  .app { grid-template-columns: minmax(0, 1fr); }
+
+  .rail {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    width: 76px;
+    z-index: 70;
+    padding-top: 12px;
+    transform: translateX(-100%);
+    transition: transform var(--dur-3) var(--ease-out);
+    border-right: 1px solid var(--border);
+  }
+  .sidebar {
+    position: fixed;
+    left: 76px; top: 0; bottom: 0;
+    width: calc(min(var(--sidebar-w), 78vw));
+    z-index: 65;
+    transform: translateX(calc(-100% - 76px));
+    transition: transform var(--dur-3) var(--ease-out);
+    box-shadow: var(--shadow-lg);
+  }
+  .app.drawer-open .rail,
+  .app.drawer-open .sidebar { transform: none; }
+
+  .icon-btn.mobile-menu-btn { display: inline-grid; }
+  .chat-header { padding-left: 6px; gap: 4px; }
+  .chat-header h2 { max-width: 48%; font-size: 15.5px; }
+  .chat-header .ch-topic { display: none; }
+
+  .composer-area { padding: 0 10px calc(10px + env(safe-area-inset-bottom)); }
+  .message { padding-left: 12px; padding-right: 12px; grid-template-columns: 40px minmax(0, 1fr); gap: 9px; }
+  .msg-toolbar { right: 8px; }
+  .msg-reply .reply-text { max-width: 220px; }
+
+  .members-panel {
+    position: fixed;
+    right: 0; top: 0; bottom: 0;
+    width: min(272px, 82vw);
+    z-index: 75;
+    padding-top: 14px;
+  }
+
+  .modal-backdrop { padding: 0; align-items: flex-end; }
+  .modal {
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    animation: sheet-in var(--dur-3) var(--ease-out);
+  }
+  @keyframes sheet-in { from { transform: translateY(24px); opacity: .5 } to { transform: none; opacity: 1 } }
+  .modal-body { padding-bottom: env(safe-area-inset-bottom); }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); min-height: 0; max-height: 76dvh; }
+  .settings-nav {
+    display: flex; gap: 4px; overflow-x: auto; border-right: 0;
+    border-bottom: 1px solid var(--border); padding: 8px;
+  }
+  .settings-nav-group { display: none; }
+  .settings-nav-item { width: auto; white-space: nowrap; margin-bottom: 0; }
+  .settings-content { padding: 16px; }
+  .theme-cards { grid-template-columns: repeat(2, 1fr); }
+  .emoji-picker { width: min(340px, calc(100vw - 24px)); }
+  .ep-grid { grid-template-columns: repeat(8, 1fr); }
+  .menu { min-width: 210px; }
+  .modal-foot { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .explore-grid { grid-template-columns: 1fr; }
+  .profile-card { width: min(306px, calc(100vw - 24px)); }
+  .chat-intro { padding: 14px 14px 4px; }
+  .chat-intro h2 { font-size: 23px; }
+  .chat-intro .ci-icon { width: 54px; height: 54px; border-radius: 16px; }
+  .jump-bottom { bottom: 104px; }
+  #toastRoot { left: 12px; right: 12px; align-items: center; }
+}
+
+@media (max-width: 420px) {
+  .msg-text { font-size: 14.5px; }
+  .composer-tools .icon-btn:nth-child(n+4) { display: none; }
+  .modal-head { padding: 18px 16px 12px; }
+  .modal-body { padding: 0 16px 4px; }
+  .modal-foot { padding: 14px 16px; }
+  .theme-cards { grid-template-columns: 1fr; }
+}
+
+/* --- short viewports --------------------------------------------------- */
+@media (max-height: 560px) {
+  .chat-intro { display: none; }
+  .toast { font-size: 12.5px; }
+}
+
+/* --- print ------------------------------------------------------------- */
+@media print {
+  .rail, .sidebar, .members-panel, .composer-area, .chat-header { display: none !important; }
+  .app { display: block; }
+  .messages-scroll { overflow: visible; }
+}
