@@ -163,3 +163,13 @@ modern CSS (`:has` avoided), `BroadcastChannel` and `localStorage`.
 
 App code: MIT. Inter and Noto Color Emoji fonts: SIL OFL 1.1. MQTT.js: MIT. See the licence files in
 `assets/fonts/` and `assets/vendor/`.
+
+## Instant preview links
+
+If GitHub Pages is not enabled on the repository yet, the same site is served straight from the
+repository through jsDelivr (no build, no config):
+
+- <https://cdn.jsdelivr.net/gh/jaydenwhite7714/TalkingAPP@main/index.html>
+
+Both hosts serve the identical static files, and the app falls back to public MQTT brokers for
+real-time transport, so either link talks to everyone else on either link.
