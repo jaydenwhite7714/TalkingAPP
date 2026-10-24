@@ -1,0 +1,52 @@
+/* Inter — SIL Open Font License 1.1 (see assets/fonts/Inter-LICENSE.txt) */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/inter-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../fonts/inter-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../fonts/inter-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../fonts/inter-latin-700-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("../fonts/inter-latin-800-normal.woff2") format("woff2");
+}
+
+/* Emoji fallback — Noto Color Emoji (SIL OFL 1.1).
+   Only downloaded when the operating system has no emoji font of its own,
+   because it sits last in the --emoji-font stack. */
+@font-face {
+  font-family: "TalkingEmoji";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/emoji-fallback.woff2") format("woff2");
+  unicode-range: U+00A9, U+00AE, U+203C, U+2049, U+2122, U+2139, U+2194-2199,
+    U+21A9-21AA, U+231A-231B, U+2328, U+23CF, U+23E9-23F3, U+23F8-23FA,
+    U+24C2, U+25AA-25AB, U+25B6, U+25C0, U+25FB-25FE, U+2600-27BF,
+    U+2934-2935, U+2B05-2B07, U+2B1B-2B1C, U+2B50, U+2B55, U+3030, U+303D,
+    U+3297, U+3299, U+FE0F, U+1F000-1FAFF;
+}

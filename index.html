@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-accent="blurple">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#1e1f22" />
+  <title>TalkingApp — talk to anyone, in real time</title>
+  <meta name="description" content="TalkingApp is a real-time chat app for the web. Pick a username, create a server, and talk to everyone on the site instantly. No sign-up, no downloads." />
+  <meta property="og:title" content="TalkingApp — talk to anyone, in real time" />
+  <meta property="og:description" content="Create a username, build servers and channels, and chat in real time with everyone on the site." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="assets/img/logo.svg" />
+  <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="assets/img/favicon.svg" />
+  <link rel="preload" href="assets/fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="assets/fonts/inter-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="assets/css/fonts.css" />
+  <link rel="stylesheet" href="assets/css/base.css" />
+  <link rel="stylesheet" href="assets/css/onboarding.css" />
+  <link rel="stylesheet" href="assets/css/layout.css" />
+  <link rel="stylesheet" href="assets/css/chat.css" />
+  <link rel="stylesheet" href="assets/css/components.css" />
+  <link rel="stylesheet" href="assets/css/responsive.css" />
+</head>
+<body>
+  <!-- ============================== BOOT ============================== -->
+  <div class="boot-screen" id="bootScreen">
+    <div class="boot-mark">
+      <img src="assets/img/logo.svg" alt="" width="56" height="56" />
+      <span class="boot-pulse" aria-hidden="true"></span>
+    </div>
+    <div class="boot-label">Connecting to the network<span class="boot-dots"><i></i><i></i><i></i></span></div>
+  </div>
+
+  <!-- ============================ ONBOARDING =========================== -->
+  <div class="onboarding hidden" id="onboarding">
+    <div class="onboarding-bg" aria-hidden="true">
+      <div class="blob blob-1"></div>
+      <div class="blob blob-2"></div>
+      <div class="blob blob-3"></div>
+      <div class="onboarding-grid"></div>
+    </div>
+    <div class="onboarding-inner">
+      <section class="hero">
+        <div class="hero-brand">
+          <img src="assets/img/logo.svg" alt="" width="34" height="34" />
+          <span class="hero-brand-name">TalkingApp</span>
+          <span class="live-pill" id="heroLivePill" data-state="online"><i></i><span id="heroLiveLabel">Real-time</span></span>
+        </div>
+        <h1>It&rsquo;s time to <span class="grad-text">talk.</span></h1>
+        <p class="hero-sub">
+          Pick a username, spin up a server, and chat with everyone on the site in real time.
+          No email, no password, no downloads &mdash; just plug in and talk.
+        </p>
+        <ul class="hero-feats">
+          <li>
+            <span class="feat-ico">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10.5 4.5h3v9h-3zM5 8.5h3v5H5zM16 8.5h3v5h-3zM8.5 12h7v3h-7z"/></svg>
+            </span>
+            <div><b>Real-time, actually</b><span>Messages stream between everyone on the page the instant you hit send.</span></div>
+          </li>
+          <li>
+            <span class="feat-ico">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v12H9l-6 5z"/></svg>
+            </span>
+            <div><b>Servers &amp; channels</b><span>Build a community for your friends, your game, or your project.</span></div>
+          </li>
+          <li>
+            <span class="feat-ico">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm-9 19c0-3.3 4-6 9-6s9 2.7 9 6v1H3Z"/></svg>
+            </span>
+            <div><b>Profiles that feel like you</b><span>Avatar, handle, accent color, bio. You are who you say you are.</span></div>
+          </li>
+        </ul>
+        <div class="hero-stats">
+          <div><b id="heroOnline">1</b><span>online now</span></div>
+          <span class="hero-stat-div"></span>
+          <div><b id="heroServers">&mdash;</b><span>public servers</span></div>
+          <span class="hero-stat-div"></span>
+          <div><b>0</b><span>installs</span></div>
+        </div>
+      </section>
+
+      <section class="signup-card">
+        <div class="signup-head">
+          <h2>Create your username</h2>
+          <p>This is how everyone will see you. You can change it later.</p>
+        </div>
+        <form id="signupForm" autocomplete="off" novalidate>
+          <div class="signup-avatar-row">
+            <button type="button" class="avatar-upload" id="avatarUpload" aria-label="Upload an avatar">
+              <span class="avatar avatar-xl" id="signupAvatar"></span>
+              <span class="avatar-upload-badge" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 3h6l1.5 2H21a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h4.5L9 3Zm3 5.5a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z"/></svg>
+              </span>
+            </button>
+            <div class="signup-avatar-copy">
+              <b>Add an avatar</b>
+              <span>Upload a picture or use a generated one.</span>
+              <button type="button" class="link-btn" id="avatarReset">Use a color instead</button>
+            </div>
+            <input type="file" id="avatarFile" accept="image/*" hidden />
+          </div>
+
+          <label class="field">
+            <span class="field-label">Display name</span>
+            <input class="input" id="displayName" name="displayName" maxlength="24" placeholder="e.g. Nova" required />
+            <span class="field-error" id="displayNameError" hidden></span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Username</span>
+            <span class="input-prefix-wrap">
+              <span class="input-prefix">@</span>
+              <input class="input input-prefixed" id="handle" name="handle" maxlength="20" placeholder="nova" required />
+            </span>
+            <span class="field-error" id="handleError" hidden></span>
+          </label>
+
+          <div class="field">
+            <span class="field-label">Avatar color</span>
+            <div class="swatches" id="colorSwatches" role="group" aria-label="Avatar color"></div>
+          </div>
+
+          <button class="btn btn-primary btn-block btn-lg" id="startBtn" type="submit">
+            Start talking
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M13.2 5.3a1 1 0 0 1 1.4 0l6 6a1 1 0 0 1 0 1.4l-6 6a1 1 0 1 1-1.4-1.4l4.3-4.3H4a1 1 0 1 1 0-2h13.5l-4.3-4.3a1 1 0 0 1 0-1.4Z"/></svg>
+          </button>
+          <p class="fine-print">
+            Your profile is saved in this browser. Messages are relayed through a public network &mdash;
+            <b>don&rsquo;t share anything private.</b>
+          </p>
+        </form>
+      </section>
+    </div>  </div>
+
+  <!-- ================================ APP ============================== -->
+  <div class="app hidden" id="app">
+    <nav class="rail" id="rail" aria-label="Servers"></nav>
+
+    <aside class="sidebar" id="sidebar" aria-label="Channels">
+      <div class="sidebar-top" id="sidebarTop"></div>
+      <div class="sidebar-scroll" id="sidebarScroll"></div>
+      <div class="user-panel" id="userPanel"></div>
+    </aside>
+
+    <main class="chat" id="chat">
+      <header class="chat-header" id="chatHeader"></header>
+      <div class="chat-body" id="chatBody">
+        <section class="messages-scroll" id="messagesScroll" aria-live="polite">
+          <div class="messages-inner" id="messagesInner"></div>
+        </section>
+        <aside class="members-panel" id="membersPanel" aria-label="Members"></aside>
+      </div>
+      <div class="composer-area" id="composerArea"></div>
+    </main>
+
+    <div class="drawer-scrim" id="drawerScrim" hidden></div>
+  </div>
+
+  <!-- ============================== OVERLAYS ============================ -->
+  <div id="modalRoot"></div>
+  <div id="popoverRoot"></div>
+  <div id="menuRoot"></div>
+  <div id="toastRoot" aria-live="assertive"></div>
+  <div id="lightboxRoot"></div>
+  <div id="tooltipRoot" aria-hidden="true"></div>
+
+  <!-- kept out of the DOM flow; used for image compression -->
+  <canvas id="avatarCanvas" width="256" height="256" hidden></canvas>
+
+  <script type="module" src="assets/js/main.js"></script>
+  <noscript>
+    <div style="padding:40px;text-align:center;color:#fff;font-family:sans-serif">
+      TalkingApp needs JavaScript to run. Please enable it and reload.
+    </div>
+  </noscript>
+</body>
+</html>
