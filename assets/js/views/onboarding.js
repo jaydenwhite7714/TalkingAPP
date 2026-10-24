@@ -1,8 +1,8 @@
 // Sign-up / username creation screen
-import { el, validateHandle, validateDisplayName, uid, storage } from '../util.js';
+import { el, validateHandle, validateDisplayName, validateServerName, uid, storage } from '../util.js';
 import { AVATAR_COLORS, defaultAvatar, avatarHTML, processImageFile } from '../avatar.js';
 import { icon } from '../icons.js';
-import { state, createProfile, registerAllCommunities } from '../store.js';
+import { state, createProfile, registerAllCommunities, createServer, toast } from '../store.js';
 import { bus } from '../bus.js';
 
 const ADJ = ['cosmic', 'quiet', 'neon', 'wild', 'lucky', 'sunny', 'midnight', 'velvet', 'rapid', 'gentle', 'electric', 'hidden', 'crimson', 'frozen', 'golden'];
@@ -124,8 +124,120 @@ export function initOnboarding({ onDone }) {
       return;
     }
     registerAllCommunities();
-    setTimeout(() => enterApp(), 420);
+    setTimeout(() => showSetupStep(nameRes.value), 260);
   });
+
+  /* ---------------------------- step 2: community ------------------------- */
+  const setupForm = document.getElementById('setupForm');
+  const serverNameInput = document.getElementById('serverName');
+  const channelInput = document.getElementById('firstChannel');
+  const serverNameErr = document.getElementById('serverNameError');
+  const previewName = document.getElementById('setupPreviewName');
+  const previewIcon = document.getElementById('setupIcon');
+  const vibeGrid = document.getElementById('vibeGrid');
+  const finishBtn = document.getElementById('finishBtn');
+
+  const VIBES = [
+    { emoji: '🎮', name: 'Gaming', server: 'Game Night', channel: 'general' },
+    { emoji: '🎵', name: 'Music', server: 'Listening Room', channel: 'now-playing' },
+    { emoji: '🎨', name: 'Creative', server: 'Studio', channel: 'showcase' },
+    { emoji: '💻', name: 'Dev', server: 'Dev Corner', channel: 'general' },
+    { emoji: '📚', name: 'Study', server: 'Study Hall', channel: 'general' },
+    { emoji: '🏀', name: 'Sports', server: 'The Bench', channel: 'general' },
+    { emoji: '🍿', name: 'Movies', server: 'Movie Night', channel: 'watchlist' },
+    { emoji: '🛋️', name: 'Friends', server: 'Hangout', channel: 'general' },
+  ];
+  let selectedVibe = null;
+  let nameTouched = false;
+
+  const paintPreview = () => {
+    const name = serverNameInput.value.trim() || 'My server';
+    previewName.textContent = name;
+    previewIcon.textContent = (selectedVibe ? selectedVibe.emoji : name.slice(0, 2)).slice(0, 2).toUpperCase();
+    previewIcon.style.setProperty('--a1', chosenAvatar?.color || '#5865f2');
+    previewIcon.style.setProperty('--a2', '#3f4bd1');
+  };
+
+  const paintVibes = () => {
+    vibeGrid.replaceChildren();
+    for (const vibe of VIBES) {
+      const btn = el('button', {
+        class: 'vibe', type: 'button', role: 'radio', 'aria-checked': String(selectedVibe === vibe),
+        onclick: () => {
+          selectedVibe = vibe;
+          // only overwrite the name if the person hasn't typed their own
+          if (!nameTouched) {
+            serverNameInput.value = vibe.server;
+            channelInput.value = vibe.channel;
+          }
+          paintVibes();
+          paintPreview();
+        },
+      }, el('span', { text: vibe.emoji }), el('span', { text: vibe.name }));
+      vibeGrid.append(btn);
+    }
+  };
+
+  serverNameInput.addEventListener('input', () => {
+    nameTouched = true;
+    serverNameErr.hidden = true;
+    paintPreview();
+  });
+
+  document.getElementById('setupBack')?.addEventListener('click', () => {
+    setupForm.classList.add('hidden');
+    setCardHead('Create your username', 'This is how everyone will see you. You can change it later.');
+    form.classList.remove('hidden');
+    nameInput.focus();
+  });
+
+  setupForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const nameRes = validateServerName(serverNameInput.value);
+    if (!nameRes.ok) {
+      serverNameErr.hidden = false;
+      serverNameErr.textContent = nameRes.error;
+      serverNameInput.focus();
+      return;
+    }
+    finishBtn.disabled = true;
+    const res = createServer({
+      name: nameRes.value,
+      desc: selectedVibe ? `A ${selectedVibe.name.toLowerCase()} server, started on TalkingApp.` : 'My corner of the TalkingApp network.',
+      color: chosenAvatar?.color || AVATAR_COLORS[0],
+      emoji: selectedVibe?.emoji || '💬',
+      channels: [channelInput.value || 'general'],
+    });
+    if (!res.ok) {
+      finishBtn.disabled = false;
+      serverNameErr.hidden = false;
+      serverNameErr.textContent = res.error;
+      return;
+    }
+    window.__taBootServerId = res.server.id;
+    window.__taOpenInviteAfterBoot = res.server.id;
+    enterApp();
+  });
+
+  const cardHead = document.querySelector('.signup-card > .signup-head');
+
+  function setCardHead(title, subtitle) {
+    if (!cardHead) return;
+    cardHead.querySelector('h2').textContent = title;
+    cardHead.querySelector('p').textContent = subtitle;
+  }
+
+  function showSetupStep(displayName) {
+    if (!serverNameInput.value) {
+      serverNameInput.value = `${displayName.split(' ')[0]}’s server`.replace(/'/g, '’');
+    }
+    paintVibes();
+    paintPreview();
+    form.classList.add('hidden');
+    setCardHead('One last thing', 'Give your corner of the network a name.');
+    setupForm.classList.remove('hidden');
+    setTimeout(() => { serverNameInput.focus(); serverNameInput.select(); }, 160);
+  }
 
   paintSwatches();
   paintAvatar();
@@ -153,6 +265,12 @@ export function initOnboarding({ onDone }) {
   paintStats();
 
   function enterApp() {
+    // a server created during signup becomes the landing spot
+    if (window.__taBootServerId && state.servers?.[window.__taBootServerId]) {
+      state.ui.activeServerId = window.__taBootServerId;
+      state.ui.activeChannelId = state.servers[window.__taBootServerId].defaultChannelId;
+      window.__taBootServerId = null;
+    }
     const onboarding = document.getElementById('onboarding');
     onboarding.style.transition = 'opacity .32s ease, transform .32s ease';
     onboarding.style.opacity = '0';

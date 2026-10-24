@@ -323,18 +323,18 @@
 #toastRoot {
   position: fixed;
   z-index: var(--z-toast);
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 66px;
+  right: 18px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  align-items: center;
+  align-items: flex-end;
   pointer-events: none;
-  width: min(440px, calc(100vw - 32px));
+  width: min(460px, calc(100vw - 32px));
 }
 .toast {
   display: flex;
+  backdrop-filter: blur(14px);
   align-items: center;
   gap: 9px;
   padding: 10px 14px;
@@ -363,8 +363,8 @@
   border-radius: 4px;
 }
 .toast .toast-action:hover { background: var(--bg-hover); }
-@keyframes toast-in { from { opacity: 0; transform: translateY(16px) scale(.96) } to { opacity: 1; transform: none } }
-@keyframes toast-out { to { opacity: 0; transform: translateY(8px) scale(.97) } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-10px) scale(.96) } to { opacity: 1; transform: none } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(-6px) scale(.97) } }
 
 /* ------------------------------- popovers ------------------------------- */
 #popoverRoot { position: fixed; inset: 0; z-index: var(--z-popover); pointer-events: none; }

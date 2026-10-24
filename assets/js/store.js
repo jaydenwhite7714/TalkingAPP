@@ -312,6 +312,26 @@ function bootstrapServers() {
   seedWelcomeMessages(first);
 }
 
+/** A fresh server starts with one pinned welcome note from the app account. */
+function seedNewServerGreeting(server) {
+  const chId = server.channelIds[0];
+  const ch = state.channels[chId];
+  const note = {
+    id: `sys_${randId(10)}`,
+    channelId: chId,
+    userId: 'talkingapp',
+    displayName: 'TalkingApp',
+    handle: 'talkingapp',
+    avatar: { kind: 'color', color: '#5865f2', color2: '#8b6ff5' },
+    text: `**${server.name} is live** 🎉\n\nThis is **#${ch?.name || 'general'}**. Hit **Invite** in the sidebar, send that link to anyone, and they land right here — everything you type shows up for them instantly.\n\n• **+** in the far-left rail starts another server\n• **Ctrl/⌘ K** finds any message\n• Click a message for reactions, replies and pins`,
+    ts: Date.now(),
+    system: true,
+    pinned: true,
+    reactions: { '🎉': [] },
+  };
+  state.messages[chId] = [note];
+}
+
 function seedWelcomeMessages(serverId) {
   const srv = state.servers[serverId];
   const welcomeCh = srv.channelIds[0];
@@ -404,6 +424,7 @@ export function createServer({ name, desc = '', color = null, emoji = '💬', is
   }
   server.defaultChannelId = server.channelIds[0];
   state.servers[server.id] = server;
+  seedNewServerGreeting(server);
   state.users[state.self.id] = state.self;
 
   if (isPublic) registerNetworkCommunity(server);
@@ -454,6 +475,7 @@ export function joinNetworkCommunity({ name, key, channels = [] }) {
   }
   server.defaultChannelId = server.channelIds[0];
   state.servers[server.id] = server;
+  seedNewServerGreeting(server);
   persistNow();
   bus.emit('servers:changed');
   bus.emit('explore:changed');

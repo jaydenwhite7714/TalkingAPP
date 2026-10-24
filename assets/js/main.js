@@ -42,6 +42,27 @@ async function boot() {
   const restored = load();
 
   bus.on('toast', ({ message, kind, action }) => toast(message, kind, { action }));
+
+  // never leave someone staring at a dead screen: surface unexpected errors gently
+  window.addEventListener('error', (event) => {
+    if (event?.message && /Script error\./.test(event.message)) return;
+    console.error('[TalkingApp]', event?.error || event?.message);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    console.error('[TalkingApp] unhandled', event.reason);
+  });
+
+  // browsers only allow audio after a gesture — unlock on the first interaction
+  const unlockAudio = () => {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume().catch(() => {});
+    } catch {}
+    window.removeEventListener('pointerdown', unlockAudio);
+    window.removeEventListener('keydown', unlockAudio);
+  };
+  window.addEventListener('pointerdown', unlockAudio, { once: true });
+  window.addEventListener('keydown', unlockAudio, { once: true });
   window.addEventListener('beforeunload', () => flush());
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) flush();
@@ -112,6 +133,26 @@ async function startApp() {
   handleInviteLink();
   updateTitle();
   setTimeout(() => focusComposer(), 500);
+
+  // brand-new accounts land in their own server: offer the invite link right away
+  if (window.__taOpenInviteAfterBoot) {
+    const server = state.servers[window.__taOpenInviteAfterBoot];
+    window.__taOpenInviteAfterBoot = null;
+    if (server) {
+      setTimeout(() => {
+        toast(`“${server.name}” is ready — invite someone in`, 'ok', {
+          duration: 9000,
+          action: {
+            label: 'Invite',
+            onClick: async () => {
+              const { openInvite } = await import('./views/modals.js');
+              openInvite(server);
+            },
+          },
+        });
+      }, 900);
+    }
+  }
 }
 
 async function handleInviteLink() {
@@ -668,12 +709,14 @@ function installShortcuts() {
 
 bus.on('active:changed', () => {
   const ch = activeChannel();
+  openChannelView(ch ? ch.id : null);
   if (ch) {
-    openChannelView(ch.id);
     history.replaceState(null, '', `#/channel/${ch.id}`);
     if (window.matchMedia('(max-width: 860px)').matches) {
       document.getElementById('messagesScroll')?.scrollTo({ top: 0 });
     }
+  } else {
+    history.replaceState(null, '', location.pathname);
   }
   updateTitle();
 });

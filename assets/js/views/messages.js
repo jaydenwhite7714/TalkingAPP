@@ -77,7 +77,10 @@ export function openChannelView(channelId) {
   let lastMsg = null;
   let lastDay = null;
   inner.replaceChildren();
-  if (!ch) return;
+  if (!ch) {
+    inner.append(noChannelState());
+    return;
+  }
 
   inner.append(introNode(ch));
 
@@ -113,6 +116,20 @@ export function openChannelView(channelId) {
     unread.scrollIntoView({ block: 'center' });
     atBottom = false;
   }
+}
+
+function noChannelState() {
+  const wrap = el('div', { class: 'empty-state' });
+  wrap.innerHTML = `<div class="es-art">${iconHTML('at', 40)}</div>
+    <h3>Your conversations live here</h3>
+    <p>Pick someone who is online right now, or start a server and invite your people with a link.</p>
+    <div class="es-actions">
+      <button class="btn btn-primary" type="button" data-action="explore">${iconHTML('compass', 16)} Explore the network</button>
+      <button class="btn btn-secondary" type="button" data-action="server">${iconHTML('plus', 16)} Create a server</button>
+    </div>`;
+  wrap.querySelector('[data-action="explore"]').addEventListener('click', () => import('./modals.js').then((m) => m.openExplore()));
+  wrap.querySelector('[data-action="server"]').addEventListener('click', () => import('./modals.js').then((m) => m.openCreateServer()));
+  return wrap;
 }
 
 function introNode(ch) {
@@ -374,6 +391,14 @@ export function messageMenu(msg, anchor) {
 
 function handleIncoming(msg) {
   if (!msg.system && !msg.isSelf) markRead(ctx.channelId);
+  // the relay echoes our own messages back; never render the same id twice
+  const existing = inner.querySelector(`.message[data-id="${cssEsc(msg.id)}"]`);
+  if (existing) {
+    const keepGroup = existing.classList.contains('group-start');
+    existing.replaceWith(messageNode(msg, { group: keepGroup }));
+    ctx.lastMsg = msg;
+    return;
+  }
   const shouldStick = atBottom || msg.isSelf;
   const lastDay = ctx.lastDay;
   if (lastDay == null || !sameDay(lastDay, msg.ts)) {

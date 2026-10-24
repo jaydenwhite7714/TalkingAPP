@@ -440,7 +440,19 @@ function renderHeader() {
   headerEl.append(menuBtn);
 
   if (!ch) {
-    headerEl.append(el('h2', { text: 'Welcome' }));
+    const home = state.ui.activeServerId === '@me';
+    headerEl.append(el('span', { class: 'ch-glyph' }, icon(home ? 'at' : 'hash', 22)));
+    headerEl.append(el('h2', { text: home ? 'Direct messages' : 'Pick a channel' }));
+    const actions = el('div', { class: 'chat-actions' });
+    actions.append(el('button', {
+      class: 'icon-btn', type: 'button', title: 'New message', 'aria-label': 'New message',
+      onclick: () => modals.openNewDM(),
+    }, icon('addUser', 19)));
+    actions.append(el('button', {
+      class: 'icon-btn', type: 'button', title: 'Explore', 'aria-label': 'Explore',
+      onclick: () => modals.openExplore(),
+    }, icon('compass', 19)));
+    headerEl.append(actions);
     return;
   }
 
