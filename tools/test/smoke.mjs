@@ -100,7 +100,7 @@ for (const id of ['bootScreen', 'onboarding', 'signupForm', 'app', 'rail', 'side
   if (html.includes(`id="${id}"`)) ok(`#${id}`);
   else fail(`#${id} missing`);
 }
-const required = ['assets/vendor/mqtt.min.js', 'assets/fonts/emoji-fallback.woff2', '404.html', '.github/workflows/pages.yml', 'tools/relay/server.mjs'];
+const required = ['assets/vendor/mqtt.min.js', 'assets/fonts/emoji-fallback.woff2', '404.html', '.nojekyll', 'tools/relay/server.mjs'];
 for (const rel of required) {
   if (fs.existsSync(path.join(root, rel))) ok(rel);
   else fail(`${rel} missing`);

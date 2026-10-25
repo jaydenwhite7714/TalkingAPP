@@ -61,15 +61,17 @@ falls back to the public brokers if it isn't running.
 
 ## Deploy to GitHub Pages
 
-The repository ships with `.github/workflows/pages.yml`.
+Nothing to build — the site is plain static files at the repository root, so Pages serves it directly.
 
 1. Push to `main`.
-2. In **Settings → Pages**, set **Source** to **GitHub Actions** (once).
-3. The workflow stages `index.html`, `404.html` and `assets/`, then publishes.
-   Your app is live at `https://<user>.github.io/<repo>/`.
+2. **Settings → Pages → Source: Deploy from a branch → `main` / `/ (root)`** (one click, once).
+3. The site goes live at `https://<user>.github.io/<repo>/` — or on jsDelivr immediately, with no
+   settings at all: `https://cdn.jsdelivr.net/gh/<user>/<repo>@main/`.
 
-Prefer a branch deploy? Point Pages at `main` / `root` — the site is plain static files, and
-`.nojekyll` / `404.html` are already in place.
+`.nojekyll` and `404.html` are already in place. If you would rather publish from Actions instead,
+drop the two "stage + upload" steps back in front of `actions/deploy-pages@v4` and set
+**Source: GitHub Actions** — but do not run both at once: a branch source and an Actions deploy
+published to the same site will race each other.
 
 ---
 
@@ -138,7 +140,7 @@ assets/js/
 tools/
   serve.mjs                zero-dependency static dev server
   relay/server.mjs         self-hostable relay (MQTT over WS + broadcast WS)
-.github/workflows/pages.yml  GitHub Pages deploy
+404.html                   branded not-found page
 ```
 
 ## Keyboard shortcuts
