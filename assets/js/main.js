@@ -4,9 +4,13 @@ import {
   receiveMessage, makeMessage, setPresence, setTyping, markRead, toast as storeToast,
   registerAllCommunities, persistNow, unreadEverywhere, selectChannel, selectServer,
   activeChannel, openDM, ensureDMChannelForUser, applyRemoteReaction, findMessage, editMessage,
-  deleteMessage, networkKeyFor, addMessage,
+  deleteMessage, networkKeyFor, addMessage, setMessageAttachment,
 } from './store.js';
-import { defaultAvatar } from './avatar.js';
+import { defaultAvatar, ensureWireAvatar } from './avatar.js';
+import { readAccount, writeAccount, readClaims, claimHandle, isClaimedLocally } from './account.js';
+import { showLock, startNetworkForLock, setUnlockHandler } from './views/lock.js';
+import { setSessionPassword, sessionPassword } from './session.js';
+import { saveVaultToCloud, ingestVaultPacket, localVault } from './vault.js';
 import { bus } from './bus.js';
 import { net } from './net.js';
 import { initShell, goToChannel, goToServer, toggleMembers } from './views/shell.js';
@@ -18,6 +22,8 @@ import { openSettings, openSearch } from './views/modals.js';
 import { toast } from './ui/toast.js';
 import { closeAllModals, isModalOpen } from './ui/modal.js';
 import { startSim, stopSim, simulateReply } from './sim.js';
+import { storage } from './util.js';
+import { useAccountNamespace, snapshotState } from './store.js';
 
 const joinedToasts = new Set();
 let started = false;
@@ -68,18 +74,25 @@ async function boot() {
     if (document.hidden) flush();
   });
 
-  if (restored && state.self) {
-    await startApp();
+  const account = readAccount();
+  const legacy = storage.get('ta.state.v2', null);
+  document.getElementById('bootScreen')?.classList.add('hidden');
+
+  wireAccountNetwork();
+  setUnlockHandler(() => enterFromLock());
+
+  if (account) {
+    useAccountNamespace(account.handle);
+    startNetworkForLock();
+    showLock({ nextMode: 'unlock' });
+  } else if (legacy?.self) {
+    // an account from before passwords existed — keep the data, add the lock
+    startNetworkForLock();
+    showLock({ nextMode: 'secure' });
   } else {
-    document.getElementById('bootScreen')?.classList.add('hidden');
     document.getElementById('onboarding')?.classList.remove('hidden');
     initOnboarding({ onDone: () => startApp() });
-    // connect early so the "live network" pill on the hero is truthful
-    const pendingProfile = storageProfile();
-    if (pendingProfile) {
-      net.init({ profile: pendingProfile, communities: [] });
-      net.start();
-    }
+    startNetworkForLock();
   }
 
   setTimeout(() => {
@@ -88,14 +101,12 @@ async function boot() {
   }, restored ? 240 : 120);
 }
 
-function storageProfile() {
-  try {
-    const raw = localStorage.getItem('ta.state.v2');
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed.self?.id) return null;
-    return parsed.self;
-  } catch { return null; }
+/** Called once the lock screen has verified the password and loaded state. */
+function enterFromLock() {
+  document.getElementById('onboarding')?.classList.add('hidden');
+  document.getElementById('lockScreen')?.classList.add('hidden');
+  document.body.classList.remove('locked');
+  queueMicrotask(() => startApp());
 }
 
 /* -------------------------------- start app ------------------------------- */
@@ -176,7 +187,7 @@ async function handleInviteLink() {
   const url = new URL(location.href);
   url.searchParams.delete('join');
   url.searchParams.delete('name');
-  history.replaceState(null, '', url.pathname + url.search + location.hash);
+  try { window.history.replaceState(null, '', url.pathname + url.search + location.hash); } catch {}
 }
 
 function startNetwork() {
@@ -227,6 +238,25 @@ function resolveIncomingChannel(p, { create = true } = {}) {
   return ch || null;
 }
 
+/** Network handlers that must exist before the app is unlocked (vault, usernames). */
+function wireAccountNetwork() {
+  bus.on('net:vault', (p) => ingestVaultPacket(p));
+
+  bus.on('net:vault-request', (p) => {
+    const account = readAccount();
+    if (!account || String(p.handle).toLowerCase() !== account.handle) return;
+    const pw = sessionPassword();
+    if (pw) saveVaultToCloud(pw).catch(() => {});
+  });
+
+  bus.on('net:handle-check', (p) => {
+    const account = readAccount();
+    if (!account) return;
+    if (String(p.handle).toLowerCase() !== account.handle) return;
+    net.publish({ kind: 'handle-taken', handle: account.handle, system: true }, { noDedupe: true });
+  });
+}
+
 function wireEvents() {
   /* ---- outgoing ---- */
   bus.on('message:out', ({ channelId, message }) => {
@@ -237,6 +267,9 @@ function wireEvents() {
       if (peerUser) {
         const sent = net.sendDM({ to: ch.dmUserId, message });
         message.queued = !sent;
+        if (message.attachment?.src) {
+          net.sendMedia({ serverKey: '@dm', channel: '@dm', msgId: message.id, attachment: message.attachment, to: ch.dmUserId });
+        }
         if (message.queued) bus.emit('message:updated', { channelId, message });
       }
       return;
@@ -252,6 +285,9 @@ function wireEvents() {
       message,
     });
     message.queued = !sent;
+    if (message.attachment?.src) {
+      net.sendMedia({ serverKey: s.networkKey, channel: ch.name, msgId: message.id, attachment: message.attachment });
+    }
     if (message.queued) bus.emit('message:updated', { channelId, message });
   });
 
@@ -294,9 +330,21 @@ function wireEvents() {
   bus.on('servers:changed', refreshCommunities);
   bus.on('server:updated', refreshCommunities);
   bus.on('channels:changed', refreshCommunities);
-  bus.on('self:changed', () => {
+
+  // keep the encrypted cloud copy reasonably fresh
+  for (const evt of ['servers:changed', 'server:updated', 'channels:changed', 'dms:changed', 'settings:changed', 'identity:created']) {
+    bus.on(evt, queueVaultSave);
+  }
+  setInterval(() => { if (vaultDirty) pushVault(); }, 45_000);
+  bus.on('message:new', () => { if (document.visibilityState === 'visible') queueVaultSave(); });
+  bus.on('self:changed', async () => {
+    if (state.self?.avatar?.kind === 'image' && !state.self.avatar.wire) {
+      state.self.avatar = await ensureWireAvatar(state.self.avatar);
+      persistNow();
+    }
     net.updateProfile(state.self);
     document.dispatchEvent(new CustomEvent('ta:self-changed'));
+    queueVaultSave();
   });
 
   /* ---- incoming ---- */
@@ -339,6 +387,12 @@ function wireEvents() {
       msg.replyToName = p.replyTo.name;
       msg.replyToText = p.replyTo.text;
     }
+    if (p.att) {
+      msg.attachmentPending = true;
+      msg.attachmentMeta = p.att;
+      // the picture itself arrives in a moment, in chunks
+      setTimeout(() => { if (msg.attachmentPending) msg.attachmentPending = false; }, 12000);
+    }
     receiveMessage({ channelId: ch.id, msg });
     notifyIncoming(ch, msg);
   });
@@ -362,10 +416,49 @@ function wireEvents() {
       network: true,
     });
     msg.id = p.msgId || msg.id;
+    if (p.att) {
+      msg.attachmentPending = true;
+      msg.attachmentMeta = p.att;
+      setTimeout(() => { if (msg.attachmentPending) msg.attachmentPending = false; }, 12000);
+    }
     receiveMessage({ channelId: ch.id, msg });
     bus.emit('dms:changed');
     if (ch.id === state.ui.activeChannelId && !document.hidden) markRead(ch.id);
     notifyIncoming(ch, msg);
+  });
+
+  /* ---- pictures & GIFs (arrive in chunks) ---- */
+  const mediaInbox = new Map();
+  const receiveMedia = (p) => {
+    if (!p?.msgId || p.part == null) return;
+    const entry = mediaInbox.get(p.msgId) || { parts: new Map(), total: p.total, meta: p.meta || {} };
+    entry.total = p.total || entry.total;
+    entry.meta = { ...entry.meta, ...(p.meta || {}) };
+    entry.parts.set(Number(p.part), p.data || '');
+    mediaInbox.set(p.msgId, entry);
+    if (entry.parts.size < entry.total) return;
+    let data = '';
+    for (let i = 0; i < entry.total; i++) {
+      const piece = entry.parts.get(i);
+      if (piece == null) return;            // still missing a chunk
+      data += piece;
+    }
+    mediaInbox.delete(p.msgId);
+    landMedia(p.msgId, { ...entry.meta, src: data, bytes: data.length }, 0);
+  };
+  const landMedia = (msgId, attachment, attempt) => {
+    const m = findMessage(msgId);
+    if (!m) {
+      if (attempt < 6) setTimeout(() => landMedia(msgId, attachment, attempt + 1), 700);
+      return;
+    }
+    setMessageAttachment(m.channelId, msgId, attachment);
+  };
+
+  bus.on('net:media', receiveMedia);
+  bus.on('net:media-dm', (p) => {
+    if (p.to && p.to !== state.self?.id) return;
+    receiveMedia(p);
   });
 
   /* ---- lightweight history sync ---- */
@@ -467,6 +560,7 @@ function wireEvents() {
   });
 
   bus.on('net:status', ({ status, transports, peers }) => {
+    if (status === 'online' && started && sessionPassword()) queueVaultSave();
     const prev = state.ui.connection;
     state.ui.connection = status;
     bus.emit('connection:changed', { status, transports, peers });
@@ -479,7 +573,7 @@ function wireEvents() {
   });
 
 
-  bus.on('settings:changed', ({ key }) => {
+  bus.on('settings:changed', ({ key } = {}) => {
     applySettings();
     if (key === 'desktopNotifs' && state.settings.desktopNotifs && 'Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission().catch(() => {});
@@ -499,12 +593,52 @@ function wireEvents() {
     showNotification('TalkingApp', 'This is what a notification looks like.');
     toast('Test notification sent', 'ok');
   });
+  document.addEventListener('ta:new-account', () => {
+    document.getElementById('app')?.classList.add('hidden');
+    const ob = document.getElementById('onboarding');
+    ob?.classList.remove('hidden');
+    if (!window.__taOnboardingReady) {
+      window.__taOnboardingReady = true;
+      initOnboarding({ onDone: () => startApp() });
+    }
+    document.getElementById('signupForm')?.scrollIntoView({ block: 'center' });
+  });
+
+  document.addEventListener('ta:lock', () => {
+    flush();
+    location.reload();
+  });
   document.addEventListener('ta:theme-changed', () => applySettings());
   document.addEventListener('ta:settings-applied', () => applySettings());
   document.addEventListener('ta:edit-profile', () => openSettings('account'));
 
   window.addEventListener('hashchange', handleHash);
   setInterval(updateTitle, 4000);
+}
+
+/* ------------------------------ cloud autosave ---------------------------- */
+
+let vaultTimer = null;
+let vaultDirty = false;
+
+function queueVaultSave() {
+  if (!sessionPassword()) return;
+  vaultDirty = true;
+  clearTimeout(vaultTimer);
+  vaultTimer = setTimeout(pushVault, 6500);
+}
+
+async function pushVault() {
+  if (!vaultDirty || !sessionPassword()) return;
+  if (net.status() !== 'online') { queueVaultSave(); return; }
+  vaultDirty = false;
+  try {
+    await saveVaultToCloud(sessionPassword());
+    bus.emit('vault:state', { state: 'saved', at: Date.now() });
+  } catch (err) {
+    vaultDirty = true;
+    bus.emit('vault:state', { state: 'error', message: err.message });
+  }
 }
 
 function clearQueuedFlags() {
@@ -711,12 +845,12 @@ bus.on('active:changed', () => {
   const ch = activeChannel();
   openChannelView(ch ? ch.id : null);
   if (ch) {
-    history.replaceState(null, '', `#/channel/${ch.id}`);
+    try { window.history.replaceState(null, '', `#/channel/${ch.id}`); } catch {}
     if (window.matchMedia('(max-width: 860px)').matches) {
       document.getElementById('messagesScroll')?.scrollTo({ top: 0 });
     }
   } else {
-    history.replaceState(null, '', location.pathname);
+    try { window.history.replaceState(null, '', location.pathname); } catch {}
   }
   updateTitle();
 });

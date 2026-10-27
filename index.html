@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark light" />
   <meta name="theme-color" content="#1e1f22" />
-  <title>TalkingApp — talk to anyone, in real time</title>
+  <title>TalkingApp — talk to anyone, in real time · by Jayden</title>
+  <meta name="author" content="Jayden" />
   <meta name="description" content="TalkingApp is a real-time chat app for the web. Pick a username, create a server, and talk to everyone on the site instantly. No sign-up, no downloads." />
   <meta property="og:title" content="TalkingApp — talk to anyone, in real time" />
   <meta property="og:description" content="Create a username, build servers and channels, and chat in real time with everyone on the site." />
@@ -18,6 +19,7 @@
   <link rel="stylesheet" href="assets/css/fonts.css" />
   <link rel="stylesheet" href="assets/css/base.css" />
   <link rel="stylesheet" href="assets/css/onboarding.css" />
+  <link rel="stylesheet" href="assets/css/account.css" />
   <link rel="stylesheet" href="assets/css/layout.css" />
   <link rel="stylesheet" href="assets/css/chat.css" />
   <link rel="stylesheet" href="assets/css/components.css" />
@@ -46,6 +48,7 @@
         <div class="hero-brand">
           <img src="assets/img/logo.svg" alt="" width="34" height="34" />
           <span class="hero-brand-name">TalkingApp</span>
+          <span class="made-by">made by Jayden</span>
           <span class="live-pill" id="heroLivePill" data-state="online"><i></i><span id="heroLiveLabel">Real-time</span></span>
         </div>
         <h1>It&rsquo;s time to <span class="grad-text">talk.</span></h1>
@@ -115,7 +118,29 @@
               <span class="input-prefix">@</span>
               <input class="input input-prefixed" id="handle" name="handle" maxlength="20" placeholder="nova" required />
             </span>
+            <span class="field-hint" id="handleStatus" hidden></span>
             <span class="field-error" id="handleError" hidden></span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Password</span>
+            <span class="input-password-wrap">
+              <input class="input" id="signupPassword" name="new-password" type="password" maxlength="128"
+                     autocomplete="new-password" placeholder="At least 6 characters" required />
+              <button class="input-eye" type="button" id="signupPasswordEye" aria-label="Show password" title="Show password">
+                <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M12 5c5 0 9 4.5 9 7s-4 7-9 7-9-4.5-9-7 4-7 9-7Zm0 2c-3.6 0-6.7 3.1-7 5 .3 1.9 3.4 5 7 5s6.7-3.1 7-5c-.3-1.9-3.4-5-7-5Zm0 1.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Z"/></svg>
+              </button>
+            </span>
+            <span class="pw-meter" id="pwMeter" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <span class="field-hint" id="pwHint">This password unlocks your account on any device. It is never sent anywhere.</span>
+            <span class="field-error" id="passwordError" hidden></span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Confirm password</span>
+            <input class="input" id="signupPassword2" name="confirm-password" type="password" maxlength="128"
+                   autocomplete="new-password" placeholder="Type it again" required />
+            <span class="field-error" id="passwordError2" hidden></span>
           </label>
 
           <div class="field">
@@ -128,8 +153,13 @@
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M13.2 5.3a1 1 0 0 1 1.4 0l6 6a1 1 0 0 1 0 1.4l-6 6a1 1 0 1 1-1.4-1.4l4.3-4.3H4a1 1 0 1 1 0-2h13.5l-4.3-4.3a1 1 0 0 1 0-1.4Z"/></svg>
           </button>
           <p class="fine-print">
-            Your profile is saved in this browser. Messages are relayed through a public network &mdash;
+            Your profile and password stay in this browser &mdash; the password only locks it and seals
+            your backup. Messages are relayed through a public network &mdash;
             <b>don&rsquo;t share anything private.</b>
+          </p>
+          <p class="signin-hint">
+            Already have an account?
+            <button type="button" class="link-btn" id="showSignin">Sign in with your username</button>
           </p>
         </form>
 
@@ -201,6 +231,76 @@
     </main>
 
     <div class="drawer-scrim" id="drawerScrim" hidden></div>
+  </div>
+
+  <!-- ============================== LOCK ================================ -->
+  <div class="lock-screen hidden" id="lockScreen">
+    <div class="lock-bg" aria-hidden="true">
+      <div class="blob blob-1"></div>
+      <div class="blob blob-2"></div>
+      <div class="lock-grid"></div>
+    </div>
+    <div class="lock-card">
+      <div class="lock-brand">
+        <img src="assets/img/logo.svg" alt="" width="30" height="30" />
+        <span>TalkingApp</span>
+        <span class="made-by">made by Jayden</span>
+      </div>
+
+      <div class="lock-who" id="lockWho">
+        <span class="lock-avatar" id="lockAvatar"></span>
+        <div class="lock-who-copy">
+          <b id="lockName">Welcome back</b>
+          <span id="lockHandle">@you</span>
+        </div>
+        <button class="lock-switch" type="button" id="lockSwitch" title="Sign in as someone else">Switch</button>
+      </div>
+
+      <h1 id="lockTitle">Unlock TalkingApp</h1>
+      <p class="lock-sub" id="lockSub">Enter your password to get back to your servers and messages.</p>
+
+      <form id="lockForm" autocomplete="on" novalidate>
+        <label class="field" id="lockUserField">
+          <span class="field-label">Username</span>
+          <span class="input-prefix-wrap">
+            <span class="input-prefix">@</span>
+            <input class="input input-prefixed" id="lockUser" name="username" autocomplete="username"
+                   maxlength="20" placeholder="yourname" spellcheck="false" />
+          </span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Password</span>
+          <span class="input-password-wrap">
+            <input class="input" id="lockPassword" name="password" type="password" autocomplete="current-password"
+                   maxlength="128" placeholder="Your password" />
+            <button class="input-eye" type="button" id="lockEye" aria-label="Show password" title="Show password">
+              <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M12 5c5 0 9 4.5 9 7s-4 7-9 7-9-4.5-9-7 4-7 9-7Zm0 2c-3.6 0-6.7 3.1-7 5 .3 1.9 3.4 5 7 5s6.7-3.1 7-5c-.3-1.9-3.4-5-7-5Zm0 1.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Z"/></svg>
+            </button>
+          </span>
+        </label>
+
+        <label class="field" id="lockConfirmField" hidden>
+          <span class="field-label">Confirm password</span>
+          <input class="input" id="lockPassword2" type="password" maxlength="128" placeholder="Type it again" autocomplete="new-password" />
+        </label>
+
+        <div class="lock-error" id="lockError" hidden></div>
+        <button class="btn btn-primary btn-block btn-lg" id="unlockBtn" type="submit">
+          <span id="unlockLabel">Unlock</span>
+        </button>
+      </form>
+
+      <div class="lock-foot">
+        <button type="button" class="link-btn" id="lockCreateAccount">Create a new account</button>
+        <span aria-hidden="true">·</span>
+        <button type="button" class="link-btn" id="lockWipe">Start over on this device</button>
+      </div>
+      <p class="lock-note" id="lockNote">
+        Your profile, servers and history are encrypted with this password. Sign in on another
+        Chromebook with the same username and password to bring everything along.
+      </p>
+    </div>
   </div>
 
   <!-- ============================== OVERLAYS ============================ -->

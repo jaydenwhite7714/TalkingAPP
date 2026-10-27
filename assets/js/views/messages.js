@@ -230,9 +230,18 @@ function messageNode(msg, { group = true } = {}) {
   body.append(text);
 
   if (msg.attachment?.src) {
-    const att = el('div', { class: 'msg-attachment', 'data-lightbox': msg.attachment.src });
-    att.innerHTML = `<img src="${escapeHtml(msg.attachment.src)}" alt="${escapeHtml(msg.attachment.name || 'attachment')}" loading="lazy" />`;
+    const isGif = msg.attachment.kind === 'gif';
+    const att = el('div', { class: `msg-attachment${isGif ? ' is-gif' : ''}`, 'data-lightbox': msg.attachment.src });
+    att.innerHTML = `<img src="${escapeHtml(msg.attachment.src)}" alt="${escapeHtml(msg.attachment.name || 'attachment')}" loading="lazy" decoding="async" />`
+      + (isGif ? '<span class="att-gif-badge">GIF</span>' : '')
+      + '<span class="att-open" aria-hidden="true">Open</span>';
     body.append(att);
+  } else if (msg.attachmentPending) {
+    body.append(el('div', { class: 'msg-attachment pending' },
+      el('span', { class: 'spinner', style: { width: '13px', height: '13px', borderWidth: '2px' } }),
+      el('span', { text: msg.attachmentMeta?.kind === 'gif' ? 'Downloading GIF…' : 'Downloading picture…' })));
+  } else if (msg.attachmentDropped) {
+    body.append(el('div', { class: 'msg-pending-op' }, icon('image', 12), 'Picture was too large to keep in the saved copy'));
   }
 
   if (msg.editedTs) {

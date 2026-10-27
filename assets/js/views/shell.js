@@ -4,7 +4,7 @@ import { icon, iconHTML } from '../icons.js';
 import { avatarHTML, serverIconHTML, defaultAvatar } from '../avatar.js';
 import {
   state, selectServer, selectChannel, dmList, unreadCount, mentionCount, markRead,
-  pinnedMessages, openDM, toast, setSetting, firstServerId,
+  pinnedMessages, openDM, toast, setSetting, firstServerId, canManageServer,
 } from '../store.js';
 import { bus } from '../bus.js';
 import { openMenu, closeMenu } from '../ui/menu.js';
@@ -156,18 +156,21 @@ function toggleTheme() {
 }
 
 function serverMenu(s, e) {
+  const owner = canManageServer(s);
   const items = [
     { label: 'Mark as read', icon: 'check', onClick: () => { s.channelIds.forEach(markRead); renderSidebar(); renderRail(); } },
     { label: 'Invite people', icon: 'userPlus', onClick: () => modals.openInvite(s) },
-    { label: 'Create channel', icon: 'hash', onClick: () => modals.openCreateChannel(s) },
-    { sep: true },
-    { label: 'Server settings', icon: 'settings', onClick: () => modals.openServerSettings(s) },
-    { sep: true },
   ];
-  if (s.isStarter || s.isRemote) {
-    items.push({ label: s.isRemote ? 'Leave community' : 'Hide from my list', icon: 'logout', danger: true, onClick: () => modals.hideServer(s) });
-  } else {
+  if (owner) {
+    items.push({ label: 'Create channel', icon: 'hash', onClick: () => modals.openCreateChannel(s) });
+    items.push({ sep: true });
+    items.push({ label: 'Server settings', icon: 'settings', onClick: () => modals.openServerSettings(s) });
+    items.push({ sep: true });
     items.push({ label: 'Delete server', icon: 'trash', danger: true, onClick: () => modals.deleteServerFlow(s) });
+  } else {
+    items.push({ sep: true });
+    items.push({ label: s.isRemote ? 'Leave community' : 'Hide from my list', icon: 'logout', danger: true, onClick: () => modals.hideServer(s) });
+    items.push({ label: 'About this server', icon: 'info', onClick: () => modals.openServerInfo(s) });
   }
   openMenu({ items, at: e, align: 'start' });
 }
@@ -222,10 +225,17 @@ function renderSidebar() {
       icon('chevronDown', 16),
     );
     top.append(switcher);
-    top.append(el('button', {
-      class: 'icon-btn', type: 'button', 'aria-label': 'Create channel', title: 'Create channel',
-      onclick: () => modals.openCreateChannel(s),
-    }, icon('plus', 18)));
+    if (canManageServer(s)) {
+      top.append(el('button', {
+        class: 'icon-btn', type: 'button', 'aria-label': 'Create channel', title: 'Create channel',
+        onclick: () => modals.openCreateChannel(s),
+      }, icon('plus', 18)));
+    } else {
+      top.append(el('button', {
+        class: 'icon-btn', type: 'button', 'aria-label': 'Server info', title: 'Server info',
+        onclick: () => modals.openServerInfo(s),
+      }, icon('info', 18)));
+    }
 
     const group = el('div', { class: `channel-group${collapsedGroups.has('text_' + s.id) ? ' collapsed' : ''}` });
     const head = el('div', { class: 'channel-group-head' },
@@ -237,10 +247,10 @@ function renderSidebar() {
           renderSidebar();
         },
       }, icon('chevronDown', 12), el('span', { text: 'Text channels' })),
-      el('button', {
+      canManageServer(s) ? el('button', {
         class: 'channel-group-add', type: 'button', 'aria-label': 'Create channel', title: 'Create channel',
         onclick: (e) => { e.stopPropagation(); modals.openCreateChannel(s); },
-      }, icon('plus', 14)),
+      }, icon('plus', 14)) : null,
     );
     group.append(head);
     const list = el('div', { class: 'channel-list' });
@@ -268,18 +278,20 @@ function renderSidebar() {
         onclick: (e) => {
           e.preventDefault();
           e.stopPropagation();
+          const owner = canManageServer(s);
           openMenu({
             items: [
-              { label: 'Edit channel', icon: 'edit', onClick: () => modals.openCreateChannel(s, ch) },
+              owner ? { label: 'Edit channel', icon: 'edit', onClick: () => modals.openCreateChannel(s, ch) } : null,
               { label: 'Copy channel name', icon: 'copy', onClick: async () => {
                 const { copyToClipboard } = await import('../util.js');
                 await copyToClipboard(`#${ch.name}`);
                 toast('Copied', 'ok');
               } },
               { label: 'Mark as read', icon: 'check', onClick: () => { markRead(cid); renderSidebar(); } },
-              { sep: true },
-              { label: 'Delete channel', icon: 'trash', danger: true, onClick: () => modals.deleteChannelFlow(ch) },
-            ],
+              { label: 'Mute notifications', icon: 'bell', onClick: () => { toast('Channel muted', 'ok'); } },
+              owner ? { sep: true } : null,
+              owner ? { label: 'Delete channel', icon: 'trash', danger: true, onClick: () => modals.deleteChannelFlow(ch) } : null,
+            ].filter(Boolean),
             at: e,
             align: 'end',
           });
@@ -623,7 +635,19 @@ function renderUserPanel() {
     onclick: () => modals.openSettings(),
   }, icon('settings', 18));
 
-  panel.append(el('div', { class: 'up-actions' }, mic, deaf, cog));
+  const lock = el('button', {
+    class: 'icon-btn', type: 'button', title: 'Lock TalkingApp', 'aria-label': 'Lock TalkingApp',
+    onclick: () => {
+      flushAndLock();
+    },
+  }, icon('lock', 18));
+
+  panel.append(el('div', { class: 'up-actions' }, mic, deaf, lock, cog));
+}
+
+function flushAndLock() {
+  import('../store.js').then((m) => m.flush());
+  document.dispatchEvent(new CustomEvent('ta:lock'));
 }
 
 /* --------------------------------- helpers -------------------------------- */

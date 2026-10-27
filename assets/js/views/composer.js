@@ -8,7 +8,7 @@ import { bus } from '../bus.js';
 import { openEmojiPicker } from '../ui/emojiPicker.js';
 import { closePopover } from '../ui/menu.js';
 import { searchEmojis } from '../emojis.js';
-import { processImageFile } from '../avatar.js';
+import { prepareAttachment } from '../avatar.js';
 
 let area = null;
 let ta = null;
@@ -108,7 +108,7 @@ function render() {
   const composer = el('div', { class: 'composer', id: 'composer' });
   const tools = el('div', { class: 'composer-tools' });
 
-  const attachBtn = el('button', { class: 'icon-btn', type: 'button', title: 'Attach an image', 'aria-label': 'Attach an image' }, icon('image', 19));
+  const attachBtn = el('button', { class: 'icon-btn', type: 'button', title: 'Attach an image or GIF', 'aria-label': 'Attach an image or GIF' }, icon('image', 19));
   attachBtn.addEventListener('click', pickImage);
   tools.append(attachBtn);
 
@@ -273,7 +273,7 @@ function onKeyDown(e) {
 
 function onPaste(e) {
   const items = Array.from(e.clipboardData?.items || []);
-  const img = items.find((i) => i.type.startsWith('image/'));
+  const img = items.find((i) => i.type.startsWith('image/') || i.type === 'image/gif');
   if (img) {
     e.preventDefault();
     const file = img.getAsFile();
@@ -336,7 +336,7 @@ function emitAttachment(msg) {
 /* -------------------------------- images --------------------------------- */
 
 function pickImage() {
-  const input = el('input', { type: 'file', accept: 'image/*', hidden: true });
+  const input = el('input', { type: 'file', accept: 'image/*,image/gif', hidden: true });
   input.addEventListener('change', () => {
     const file = input.files?.[0];
     if (file) attachImage(file);
@@ -348,25 +348,28 @@ function pickImage() {
 
 async function attachImage(file) {
   try {
-    const { src } = await processImageFile(file, { size: 720, quality: 0.72, maxInputBytes: 10 * 1024 * 1024 });
-    if (src.length > 900_000) throw new Error('That image is too large — try a smaller one.');
-    attachment = { kind: 'image', src, name: file.name || 'image', ts: Date.now() };
+    clearPreview();
     const composer = document.getElementById('composer');
+    let preview = el('div', { class: 'composer-attachment', id: 'composerAttachment' },
+      el('span', { class: 'ca-spinner' }, el('span', { class: 'spinner', style: { width: '13px', height: '13px', borderWidth: '2px' } }), 'Preparing…'));
+    area.insertBefore(preview, area.querySelector('.composer'));
     composer?.classList.add('has-text');
-    let preview = document.getElementById('composerAttachment');
-    if (!preview) {
-      preview = el('div', { class: 'composer-reply', id: 'composerAttachment' });
-      area.insertBefore(preview, area.querySelector('.composer'));
-    }
+
+    const prepared = await prepareAttachment(file);
+    attachment = { ...prepared, ts: Date.now() };
+
+    const isGif = prepared.kind === 'gif';
+    const kb = Math.max(1, Math.round((prepared.bytes || prepared.src.length) / 1024));
     preview.replaceChildren(
-      icon('image', 15),
-      el('span', { text: `Image ready — ${file.name || 'attachment'}` }),
-      el('span', { class: 'grow' }),
+      el('div', { class: 'ca-thumb' }, el('img', { src: prepared.src, alt: '' })),
+      el('div', { class: 'ca-meta' },
+        el('b', { text: isGif ? 'GIF ready' : 'Image ready' }),
+        el('span', { text: `${prepared.name} · ${kb} KB${isGif ? ' · animated' : ''}` })),
       el('button', {
-        class: 'icon-btn', type: 'button', 'aria-label': 'Remove attachment',
+        class: 'icon-btn', type: 'button', 'aria-label': 'Remove attachment', title: 'Remove',
         onclick: () => {
           attachment = null;
-          preview.remove();
+          clearPreview();
           const c = document.getElementById('composer');
           if (c && !ta.value.trim()) c.classList.remove('has-text');
         },
@@ -374,8 +377,14 @@ async function attachImage(file) {
     );
     focusComposer();
   } catch (err) {
+    clearPreview();
+    attachment = null;
     toast(err.message || 'Could not attach that image', 'error');
   }
+}
+
+function clearPreview() {
+  document.getElementById('composerAttachment')?.remove();
 }
 
 /* ------------------------------ autocomplete ----------------------------- */
