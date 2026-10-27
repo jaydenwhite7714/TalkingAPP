@@ -1,9 +1,14 @@
 // Sign-up / username creation screen
-import { el, validateHandle, validateDisplayName, validateServerName, uid, storage } from '../util.js';
-import { AVATAR_COLORS, defaultAvatar, avatarHTML, processImageFile } from '../avatar.js';
+import { el, validateHandle, validateDisplayName, validateServerName, storage, debounce } from '../util.js';
+import { AVATAR_COLORS, defaultAvatar, avatarHTML, initialsOf, prepareAvatarFile } from '../avatar.js';
 import { icon } from '../icons.js';
-import { state, createProfile, registerAllCommunities, createServer, toast } from '../store.js';
+import { state, createProfile, registerAllCommunities, createServer, toast, useAccountNamespace, persistNow } from '../store.js';
 import { bus } from '../bus.js';
+import { registerAccount, passwordProblem, passwordStrength, isClaimedLocally, suggestHandle, checkPassword } from '../account.js';
+import { setSessionPassword } from '../session.js';
+import { saveVaultToCloud } from '../vault.js';
+import { net } from '../net.js';
+import { showLock } from './lock.js';
 
 const ADJ = ['cosmic', 'quiet', 'neon', 'wild', 'lucky', 'sunny', 'midnight', 'velvet', 'rapid', 'gentle', 'electric', 'hidden', 'crimson', 'frozen', 'golden'];
 const NOUN = ['otter', 'comet', 'pixel', 'falcon', 'cactus', 'ember', 'harbor', 'lynx', 'mango', 'orbit', 'panda', 'raven', 'sock', 'tiger', 'wave'];
@@ -25,10 +30,39 @@ export function initOnboarding({ onDone }) {
   const resetBtn = document.getElementById('avatarReset');
   const swatches = document.getElementById('colorSwatches');
   const startBtn = document.getElementById('startBtn');
+  const pwInput = document.getElementById('signupPassword');
+  const pwInput2 = document.getElementById('signupPassword2');
+  const pwMeter = document.getElementById('pwMeter');
+  const pwHint = document.getElementById('pwHint');
+  const pwErr = document.getElementById('passwordError');
+  const pwErr2 = document.getElementById('passwordError2');
+  const handleStatus = document.getElementById('handleStatus');
+  const eyeBtn = document.getElementById('signupPasswordEye');
+
+  eyeBtn?.addEventListener('click', () => {
+    const show = pwInput.type === 'password';
+    pwInput.type = show ? 'text' : 'password';
+    pwInput2.type = show ? 'text' : 'password';
+    eyeBtn.setAttribute('aria-pressed', String(show));
+    eyeBtn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    pwInput.focus({ preventScroll: true });
+  });
+
+  pwInput.addEventListener('input', () => {
+    const { score, label, hint } = passwordStrength(pwInput.value);
+    pwMeter.dataset.score = String(score);
+    pwHint.className = 'field-hint';
+    pwHint.textContent = pwInput.value ? `${label} — ${hint}` : 'This password unlocks your account on any device. It is never sent anywhere.';
+    pwErr.hidden = true;
+  });
+  pwInput2.addEventListener('input', () => { pwErr2.hidden = true; });
 
   // seed with a friendly suggestion
   const suggestion = `${ADJ[Math.floor(Math.random() * ADJ.length)]}${NOUN[Math.floor(Math.random() * NOUN.length)]}`;
-  chosenAvatar = defaultAvatar(suggestion, AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)]);
+  chosenAvatar = {
+    ...defaultAvatar(suggestion, AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)]),
+    initials: initialsOf(suggestion),
+  };
   nameInput.value = suggestion.charAt(0).toUpperCase() + suggestion.slice(1);
   handleInput.value = suggestion;
 
@@ -45,7 +79,7 @@ export function initOnboarding({ onDone }) {
         class: 'swatch', type: 'button', role: 'radio', 'aria-checked': String(checked),
         style: { background: c }, 'aria-label': `Avatar color ${c}`, title: c,
         onclick: () => {
-          chosenAvatar = { kind: 'color', color: c };
+          chosenAvatar = { kind: 'color', color: c, initials: initialsOf(nameInput.value || 'You') };
           paintSwatches();
           paintAvatar();
         },
@@ -72,6 +106,7 @@ export function initOnboarding({ onDone }) {
     const caret = handleInput.selectionStart;
     handleInput.value = handleInput.value.toLowerCase().replace(/\s+/g, '');
     handleInput.setSelectionRange(caret, caret);
+    runCheck(handleInput.value.trim());
   });
 
   uploadBtn.addEventListener('click', () => avatarFile.click());
@@ -79,8 +114,7 @@ export function initOnboarding({ onDone }) {
     const file = avatarFile.files?.[0];
     if (!file) return;
     try {
-      const { src } = await processImageFile(file, { size: 192, quality: 0.82 });
-      chosenAvatar = { kind: 'image', src };
+      chosenAvatar = await prepareAvatarFile(file, { size: 176 });
       paintAvatar();
       paintSwatches();
     } catch (e) {
@@ -89,12 +123,43 @@ export function initOnboarding({ onDone }) {
     avatarFile.value = '';
   });
   resetBtn.addEventListener('click', () => {
-    chosenAvatar = defaultAvatar(handleInput.value || 'friend', AVATAR_COLORS[0]);
+    chosenAvatar = { ...defaultAvatar(handleInput.value || 'friend', AVATAR_COLORS[0]), initials: initialsOf(nameInput.value || 'You') };
     paintAvatar();
     paintSwatches();
   });
 
-  form.addEventListener('submit', (e) => {
+  // live username availability: this device first, then everyone online
+  let availability = { state: 'idle' };
+  let lastCheck = { handle: '', at: 0, taken: false, by: null };
+  const paintAvailability = () => {
+    if (!handleStatus) return;
+    if (availability.state === 'idle') { handleStatus.hidden = true; return; }
+    handleStatus.hidden = false;
+    handleStatus.className = `field-hint ${availability.state === 'free' ? 'ok' : availability.state === 'taken' ? 'bad' : ''}`;
+    handleStatus.textContent = availability.message;
+  };
+  const runCheck = debounce(async (handle) => {
+    const valid = /^[a-z0-9._-]{2,20}$/.test(handle);
+    if (!valid) { availability = { state: 'idle' }; paintAvailability(); return; }
+    if (isClaimedLocally(handle)) {
+      availability = { state: 'taken', message: `@${handle} is already saved on this device — sign in to it instead.` };
+      paintAvailability();
+      return;
+    }
+    availability = { state: 'checking', message: `Checking whether @${handle} is free…` };
+    paintAvailability();
+    const result = await net.checkHandle(handle, { timeout: 900 }).catch(() => ({ taken: false }));
+    lastCheck = { handle, at: Date.now(), taken: Boolean(result.taken), by: result.by || null };
+    if (handleInput.value.trim().toLowerCase() !== handle) return;
+    if (result.taken) {
+      availability = { state: 'taken', message: `@${handle} is taken${result.by ? ` by ${result.by}` : ''} — try @${suggestHandle(handle)}.` };
+    } else {
+      availability = { state: 'free', message: `@${handle} is free — it will be yours.` };
+    }
+    paintAvailability();
+  }, 420);
+
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const nameRes = validateDisplayName(nameInput.value);
     if (!nameRes.ok) {
@@ -110,20 +175,57 @@ export function initOnboarding({ onDone }) {
       handleInput.focus();
       return;
     }
+    const pwProblem = passwordProblem(pwInput.value);
+    if (pwProblem) {
+      showError(pwErr, pwProblem);
+      pwInput.focus();
+      return;
+    }
+    if (pwInput.value !== pwInput2.value) {
+      showError(pwErr2, 'Those passwords do not match.');
+      pwInput2.focus();
+      return;
+    }
+    if (isClaimedLocally(handleRes.value)) {
+      showError(handleErr, `@${handleRes.value} is already saved on this device. Sign in to it, or pick @${suggestHandle(handleRes.value)}.`);
+      return;
+    }
+
     startBtn.disabled = true;
+    startBtn.replaceChildren(el('span', { class: 'spinner' }), 'Checking the username…');
+
+    // reuse the check the field already ran, so pressing the button feels instant
+    const fresh = lastCheck.handle === handleRes.value && Date.now() - lastCheck.at < 8000;
+    const live = fresh
+      ? { taken: lastCheck.taken, by: lastCheck.by }
+      : await net.checkHandle(handleRes.value, { timeout: 900 }).catch(() => ({ taken: false }));
+    if (live.taken) {
+      startBtn.disabled = false;
+      startBtn.replaceChildren('Start talking');
+      showError(handleErr, `@${handleRes.value} is taken${live.by ? ` by ${live.by}` : ''} — try @${suggestHandle(handleRes.value)}.`);
+      return;
+    }
+
     startBtn.replaceChildren(el('span', { class: 'spinner' }), 'Creating your profile…');
+    await registerAccount({ handle: handleRes.value, displayName: nameRes.value, password: pwInput.value });
+    setSessionPassword(pwInput.value);
+    useAccountNamespace(handleRes.value);
+
     const res = createProfile({
       displayName: nameRes.value,
       handle: handleRes.value,
-      avatar: chosenAvatar,
+      avatar: chosenAvatar || { ...defaultAvatar(nameRes.value), initials: initialsOf(nameRes.value) },
       accentColor: chosenAvatar?.color || AVATAR_COLORS[0],
     });
     if (!res.ok) {
       startBtn.disabled = false;
+      startBtn.replaceChildren('Start talking');
       showError(handleErr, res.error);
       return;
     }
     registerAllCommunities();
+    persistNow();
+    saveVaultToCloud(pwInput.value).catch(() => {});
     setTimeout(() => showSetupStep(nameRes.value), 260);
   });
 
@@ -239,6 +341,11 @@ export function initOnboarding({ onDone }) {
     setTimeout(() => { serverNameInput.focus(); serverNameInput.select(); }, 160);
   }
 
+  document.getElementById('showSignin')?.addEventListener('click', () => {
+    document.getElementById('onboarding')?.classList.add('hidden');
+    showLock({ nextMode: 'signin' });
+  });
+
   paintSwatches();
   paintAvatar();
 
@@ -283,10 +390,6 @@ export function initOnboarding({ onDone }) {
     }, 180);
   }
 
-  // returning user shortcut
-  if (storage.get('ta.state.v2', null)?.self) {
-    document.getElementById('onboarding')?.classList.add('hidden');
-  }
 }
 
 function showError(node, message) {

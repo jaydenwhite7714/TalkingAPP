@@ -26,7 +26,7 @@ const stats = { wsClients: 0, mqttClients: 0, frames: 0 };
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
-    res.end(JSON.stringify({ ok: true, uptime: Math.round((Date.now() - started) / 1000), ...stats }));
+    res.end(JSON.stringify({ ok: true, uptime: Math.round((Date.now() - started) / 1000), retained: retained.size, ...stats }));
     return;
   }
   res.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*' });
@@ -35,15 +35,42 @@ const httpServer = http.createServer((req, res) => {
 
 /* ---------------------------- raw ws broadcast --------------------------- */
 
+// Retained frames (the encrypted vault) are kept in memory and replayed to
+// every new client, so a fresh device can restore an account with no peers online.
+const retained = new Map();          // topic -> { payload, savedAt }
+const RETAIN_LIMIT = 260 * 1024 * 1024;
+
 const rawWss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME });
 rawWss.on('connection', (socket) => {
   stats.wsClients++;
   socket.isAlive = true;
   socket.on('pong', () => { socket.isAlive = true; });
+
+  // hand over the retained state first, oldest topics first
+  for (const [topic, entry] of retained) {
+    if (socket.readyState !== 1) break;
+    try { socket.send(entry.payload); } catch { break; }
+  }
+
   socket.on('message', (data) => {
     const text = data.toString();
     if (text.length > MAX_FRAME) return;
     stats.frames++;
+
+    if (text.startsWith('{"__ta_retain"')) {
+      try {
+        const frame = JSON.parse(text);
+        if (frame?.__ta_retain && frame.topic) {
+          let size = 0;
+          for (const [, entry] of retained) size += entry.payload.length;
+          if (size < RETAIN_LIMIT) {
+            retained.set(String(frame.topic), { payload: String(frame.payload), savedAt: Date.now() });
+            stats.retained = retained.size;
+          }
+        }
+      } catch {}
+    }
+
     for (const client of rawWss.clients) {
       if (client !== socket && client.readyState === 1) client.send(text);
     }

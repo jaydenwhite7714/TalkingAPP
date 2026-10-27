@@ -6,8 +6,11 @@ import {
   state, createServer, createChannel, updateChannel, deleteChannel, updateServer, deleteServer,
   updateSelf, setSetting, setTheme, setAccent, dmList, openDM, ensureDMChannelForUser, markRead,
   pinnedMessages, toast, searchAll, unreadCount, joinNetworkCommunity, signOut, resetEverything,
-  flush, persistNow, networkKeyFor, activeChannel,
+  flush, persistNow, networkKeyFor, activeChannel, canManageServer,
 } from '../store.js';
+import { readAccount, checkPassword, changeAccountPassword } from '../account.js';
+import { sessionPassword } from '../session.js';
+import { downloadBackup, readBackupFile, saveVaultToCloud, restoreSnapshot, localVault } from '../vault.js';
 import { bus } from '../bus.js';
 import { openModal, confirmDialog, promptDialog, closeAllModals } from '../ui/modal.js';
 import { openMenu } from '../ui/menu.js';
@@ -127,6 +130,10 @@ export function openCreateServer() {
 /* ============================= create channel ============================ */
 
 export function openCreateChannel(server, existing = null, { preselectName = '' } = {}) {
+  if (!canManageServer(server)) {
+    toast(`Only ${ownerNameOf(server)} can change channels in this server.`, 'warn');
+    return;
+  }
   const isEdit = Boolean(existing);
   const nameInput = el('input', { class: 'input', maxlength: '28', value: existing?.name || preselectName, placeholder: 'new-channel', autofocus: true });
   const topicInput = el('input', { class: 'input', maxlength: '140', value: existing?.topic || '', placeholder: 'What is this channel for?' });
@@ -189,6 +196,11 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
 }
 
 export function deleteChannelFlow(ch) {
+  const server = state.servers[ch.serverId];
+  if (!canManageServer(server)) {
+    toast(`Only ${ownerNameOf(server)} can delete channels here.`, 'warn');
+    return;
+  }
   const total = state.servers[ch.serverId]?.channelIds.length || 0;
   if (total <= 1) {
     toast('A server needs at least one channel.', 'warn');
@@ -277,6 +289,11 @@ export function openInvite(server) {
 /* ============================= server settings ========================== */
 
 export function openServerSettings(server) {
+  if (!canManageServer(server)) {
+    toast(`Only ${ownerNameOf(server)} can edit this server.`, 'warn');
+    openServerInfo(server);
+    return;
+  }
   const nameInput = el('input', { class: 'input', maxlength: '32', value: server.name });
   const descInput = el('input', { class: 'input', maxlength: '180', value: server.desc || '' });
   let color = server.color || '#5865f2';
@@ -370,7 +387,50 @@ export function openServerSettings(server) {
   const ref = openModal({ title: 'Server settings', subtitle: server.name, content, footer, icon: 'settings', size: 'wide' });
 }
 
+function ownerNameOf(server) {
+  if (!server?.ownerId) return 'the owner';
+  if (server.ownerId === state.self?.id) return 'you';
+  const owner = state.users[server.ownerId];
+  return owner?.displayName ? owner.displayName : 'the owner';
+}
+
+/** Read-only view for servers you did not create. */
+export function openServerInfo(server) {
+  const owner = server.ownerId ? state.users[server.ownerId] : null;
+  const ownerLabel = owner?.displayName || (server.isRemote ? 'another member' : 'the TalkingApp team');
+  const content = el('div', { class: 'modal-body pad' },
+    el('div', { class: 'sync-card' },
+      el('div', { class: 'sync-ico', html: iconHTML('lock', 18) }),
+      el('div', {},
+        el('b', { text: `Owned by ${ownerLabel}` }),
+        el('span', { text: 'Only the owner can rename this server, change its icon, or add and remove channels.' }))),
+    el('div', { class: 'kv-list' },
+      el('div', {}, el('span', { text: 'Name' }), el('b', { text: server.name })),
+      el('div', {}, el('span', { text: 'Channels' }), el('b', { text: String(server.channelIds.length) })),
+      el('div', {}, el('span', { text: 'Network key' }), el('b', { text: server.networkKey })),
+      el('div', {}, el('span', { text: 'Type' }), el('b', { text: server.isRemote ? 'network community' : server.isStarter ? 'official' : 'private' })),
+    ),
+    server.desc ? el('p', { class: 'muted', style: { marginTop: '12px', fontSize: '13px', lineHeight: '1.55' }, text: server.desc }) : null,
+    el('div', { class: 'tip-card', style: { marginTop: '12px' } },
+      el('div', { class: 'tip-ico', html: iconHTML('userPlus', 15) }),
+      el('div', {}, el('b', { text: 'Want your own space?' }),
+        el('p', { text: 'Create a server from the + button and you can shape it however you like.' }))),
+  );
+  const footer = el('div', { class: 'modal-foot spread' },
+    el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { ref.close(); hideServer(server); } }, icon('logout', 15), 'Leave'),
+    el('div', { class: 'row', style: { gap: '8px' } },
+      el('button', { class: 'btn btn-secondary', type: 'button', onclick: () => { ref.close(); openInvite(server); } }, icon('userPlus', 15), 'Invite'),
+      el('button', { class: 'btn btn-primary', type: 'button', onclick: () => ref.close() }, 'Done')),
+  );
+  const ref = openModal({ title: server.name, subtitle: 'Server info', content, footer, icon: 'info' });
+  return ref;
+}
+
 export function deleteServerFlow(server) {
+  if (!canManageServer(server)) {
+    toast(`Only ${ownerNameOf(server)} can delete this server.`, 'warn');
+    return;
+  }
   confirmDialog({
     title: `Delete ${server.name}?`,
     body: 'This removes the server, its channels and the local message history. You cannot undo it.',
@@ -676,6 +736,7 @@ function firstServer() {
 
 const NAV = [
   { id: 'account', label: 'My account', icon: 'user' },
+  { id: 'backup', label: 'Backup & sync', icon: 'uploadCloud' },
   { id: 'profile', label: 'Profile', icon: 'edit' },
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'notifications', label: 'Notifications', icon: 'bell' },
@@ -715,6 +776,7 @@ export function openSettings(tab = MODAL_TAB.lastSettingsTab || 'account') {
   function renderTab(id) {
     content.replaceChildren();
     if (id === 'account') content.append(accountTab());
+    else if (id === 'backup') content.append(backupTab());
     else if (id === 'profile') content.append(profileTab());
     else if (id === 'appearance') content.append(appearanceTab());
     else if (id === 'notifications') content.append(notificationsTab());
@@ -792,15 +854,155 @@ function accountTab() {
       }, 'Save now'),
       el('span', { class: 'grow' }),
       el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        onclick: async () => {
-          const ok = await confirmDialog({ title: 'Sign out', body: 'This clears your profile and message history from this browser. You can create a new username right away.', confirmLabel: 'Sign out', danger: true });
-          if (ok) signOut();
-        },
-      }, icon('logout', 15), 'Sign out'),
+        class: 'btn btn-secondary btn-sm', type: 'button',
+        onclick: () => { closeAllModals(); document.dispatchEvent(new CustomEvent('ta:lock')); },
+      }, icon('lock', 15), 'Lock now'),
     ),
+    passwordBlock(),
   );
   return wrap;
+}
+
+/* ------------------------------ account security -------------------------- */
+
+function passwordBlock() {
+  const account = readAccount();
+  if (!account) {
+    return el('div', { class: 'setting-block' },
+      el('div', { class: 'sr-title', text: 'Password' }),
+      el('div', { class: 'sr-desc', text: 'This device has no saved password. Lock the app to set one.' }));
+  }
+  const current = el('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: 'Current password' });
+  const next = el('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: 'New password (6+ characters)' });
+  const confirm = el('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: 'Repeat new password' });
+  const err = el('div', { class: 'form-error', hidden: true });
+  const btn = el('button', {
+    class: 'btn btn-primary btn-sm', type: 'button',
+    onclick: async () => {
+      if (next.value !== confirm.value) { err.hidden = false; err.textContent = 'The new passwords do not match.'; return; }
+      btn.disabled = true;
+      const res = await changeAccountPassword(current.value, next.value);
+      btn.disabled = false;
+      if (!res.ok) { err.hidden = false; err.textContent = res.error; return; }
+      err.hidden = true;
+      current.value = next.value = confirm.value = '';
+      toast('Password changed — your cloud copy re-seals with it', 'ok');
+      const { setSessionPassword } = await import('../session.js');
+      setSessionPassword(next.value);
+      saveVaultToCloud(next.value).catch(() => {});
+    },
+  }, 'Change password');
+  return el('div', { class: 'setting-block' },
+    el('div', { class: 'sr-title', text: 'Password' }),
+    el('div', { class: 'sr-desc', text: `Unlocks this account. Stored as a salted PBKDF2 hash (${account.iterations.toLocaleString()} rounds) — the password itself never touches storage or the network.` }),
+    el('div', { class: 'form-row' }, current),
+    el('div', { class: 'form-row' }, next, confirm),
+    err,
+    el('div', { class: 'row', style: { marginTop: '10px' } }, btn));
+}
+
+/* -------------------------------- backup tab ------------------------------ */
+
+function backupTab() {
+  const account = readAccount();
+  const vault = localVault();
+  const savedAt = vault?.savedAt ? formatRelative(vault.savedAt) : 'never';
+  const stateLabel = el('span', { class: 'sync-state', text: account ? `Signed in as @${account.handle}` : 'No account' });
+
+  bus.on('vault:state', (p) => {
+    if (p.state === 'saved') {
+      stateLabel.textContent = 'Cloud copy saved just now';
+      stateLabel.style.color = 'var(--green-bright)';
+    } else if (p.state === 'error') {
+      stateLabel.textContent = p.message || 'Could not save to the cloud';
+      stateLabel.style.color = 'var(--yellow)';
+    }
+  });
+
+  const fileInput = el('input', { type: 'file', accept: 'application/json,.json', hidden: true });
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = '';
+    if (!file) return;
+    try {
+      const snapshot = await readBackupFile(file);
+      const ok = await confirmDialog({
+        title: 'Restore this backup?',
+        body: `This replaces what is on this device with ${snapshot.self.displayName}'s data (${Object.keys(snapshot.servers || {}).length} servers). Your cloud copy is left alone until the next save.`,
+        confirmLabel: 'Restore',
+      });
+      if (!ok) return;
+      restoreSnapshot(snapshot);
+      closeAllModals();
+      location.reload();
+    } catch (e) {
+      toast(e.message || 'Could not read that backup', 'error');
+    }
+  });
+
+  const saveBtn = el('button', {
+    class: 'btn btn-primary btn-sm', type: 'button',
+    onclick: async () => {
+      const pw = sessionPassword();
+      if (!pw) { toast('Unlock with your password first', 'warn'); return; }
+      saveBtn.disabled = true;
+      stateLabel.textContent = 'Sealing your data…';
+      try {
+        const res = await saveVaultToCloud(pw);
+        stateLabel.textContent = `Saved ${Math.round(res.size / 1024)} KB · ${res.parts} part${res.parts === 1 ? '' : 's'}`;
+        stateLabel.style.color = 'var(--green-bright)';
+        toast('Cloud copy updated', 'ok');
+      } catch (e) {
+        stateLabel.textContent = e.message || 'Could not save';
+        stateLabel.style.color = 'var(--yellow)';
+      } finally {
+        saveBtn.disabled = false;
+      }
+    },
+  }, icon('uploadCloud', 15), 'Save to the cloud now');
+
+  return el('div', {},
+    el('h3', { text: 'Backup & sync' }),
+    el('p', { class: 'sc-sub', text: 'Everything — servers, channels, history, DMs, settings and your profile — is saved under your username.' }),
+    el('div', { class: 'sync-card' },
+      el('div', { class: 'sync-ico', html: iconHTML('uploadCloud', 19) }),
+      el('div', { style: { flex: '1', minWidth: '0' } },
+        el('b', { text: 'Encrypted cloud copy' }),
+        el('span', { text: `Last saved ${savedAt}. Same username + password on another Chromebook restores it.` }),
+        stateLabel),
+      saveBtn),
+    el('div', { class: 'setting-block' },
+      el('div', { class: 'sr-title', text: 'How it works' }),
+      el('ul', { class: 'bullets' },
+        el('li', { text: 'Your data is sealed with AES-256-GCM using a key derived from your password (PBKDF2, 150k rounds).' }),
+        el('li', { text: 'The sealed copy is published to the relay as retained messages, so a new device can pick it up even if nobody else is online.' }),
+        el('li', { text: 'The password itself is never stored, sent, or derivable from the copy.' }),
+        el('li', { text: 'Pictures that would bloat the copy are dropped from it; your local device keeps them.' })),
+    ),
+    el('div', { class: 'setting-block' },
+      el('div', { class: 'sr-title', text: 'Move to another computer' }),
+      el('div', { class: 'sr-desc', text: 'Sign in there with the same username and password — or carry a file if you prefer.' }),
+      el('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap', marginTop: '10px' } },
+        el('button', {
+          class: 'btn btn-secondary btn-sm', type: 'button',
+          onclick: async () => {
+            try {
+              const res = await downloadBackup();
+              toast(`Saved ${res.name}`, 'ok');
+            } catch (e) { toast('Could not export that backup', 'error'); }
+          },
+        }, icon('download', 15), 'Download a backup file'),
+        el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          onclick: () => fileInput.click(),
+        }, icon('upload', 15), 'Restore from a file'),
+        fileInput),
+    ),
+    el('div', { class: 'tip-card', style: { marginTop: '14px' } },
+      el('div', { class: 'tip-ico', html: iconHTML('shield', 15) }),
+      el('div', {}, el('b', { text: 'If you forget the password' }),
+        el('p', { text: 'Nobody can recover the cloud copy — that is what keeps it private. A downloaded backup file is your fallback, and your device keeps working as long as you remember it.' }))),
+  );
 }
 
 function renderAvatarRow(holder) {
@@ -1104,6 +1306,10 @@ function aboutTab() {
   const wrap = el('div', {},
     el('h3', { text: 'About TalkingApp' }),
     el('p', { class: 'sc-sub', text: 'A real-time chat app that runs entirely in your browser and deploys free on GitHub Pages.' }),
+    el('div', { class: 'sync-card' },
+      el('div', { class: 'sync-ico', html: iconHTML('heart', 18) }),
+      el('div', {}, el('b', { text: 'Made by Jayden' }),
+        el('span', { text: 'Designed and built by hand — no frameworks, no tracking, no ads.' }))),
     el('div', { class: 'setting-block' },
       el('div', { class: 'kv-list' },
         el('div', {}, el('span', { text: 'Version' }), el('b', { text: CONFIG.version })),

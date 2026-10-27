@@ -19,9 +19,19 @@ const FALLBACK_COLORS = [
   ['#fb923c', '#f43f5e'],
 ];
 
+/**
+ * A generated avatar. The initials and the gradient are frozen here, at the
+ * moment the avatar is made — so renaming yourself later changes your name,
+ * never your picture.
+ */
 export function defaultAvatar(name = '', color = null) {
   const pair = FALLBACK_COLORS[hueFromString(name || 'x') % FALLBACK_COLORS.length];
-  return { kind: 'color', color: color || pair[0], color2: color ? null : pair[1] };
+  return {
+    kind: 'color',
+    color: color || pair[0],
+    color2: color ? shade(color, -16) : pair[1],
+    initials: initialsOf(name || '?'),
+  };
 }
 
 export function initialsOf(name = '') {
@@ -56,8 +66,11 @@ export function avatarHTML(user = {}, opts = {}) {
   const c1 = av.color || '#5865f2';
   const c2 = av.color2 || shade(c1, -14);
   const fontSize = Math.max(10, Math.round(size * 0.4));
+  // av.initials is frozen when the avatar is created, so a rename keeps the
+  // same picture instead of redrawing different letters.
+  const letters = av.initials || initialsOf(name);
   return `<span class="${base} ${rounded}" style="${style};--a1:${escapeHtml(c1)};--a2:${escapeHtml(c2)};font-size:${fontSize}px" role="img" aria-label="${label}">
-    <span class="avatar-initials">${escapeHtml(initialsOf(name))}</span>
+    <span class="avatar-initials">${escapeHtml(letters)}</span>
     ${showStatus && status ? statusDot(status) : ''}
   </span>`;
 }
@@ -134,4 +147,141 @@ export function serverIconHTML(server = {}, { size = 48, active = false } = {}) 
     </span>`;
   }
   return `<span class="server-icon server-icon-mono" style="width:${size}px;height:${size}px;--a1:${escapeHtml(color)};--a2:${escapeHtml(color2)};font-size:${Math.round(size * 0.36)}px">${escapeHtml(initialsOf(name).slice(0, 2))}</span>`;
+}
+
+
+/* ------------------------------ image helpers ----------------------------- */
+
+export function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('We could not read that image.'));
+    img.src = src;
+  });
+}
+
+export function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('That file could not be read.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function hasAlpha(type = '') {
+  return /png|webp|gif|svg/i.test(type);
+}
+
+function canvasToDataUrl(canvas, type, quality) {
+  const url = canvas.toDataURL(type, quality);
+  // some engines silently fall back to PNG; keep it small by trying JPEG too
+  if (type === 'image/webp' && url.startsWith('data:image/png')) return canvas.toDataURL('image/jpeg', quality);
+  return url;
+}
+
+/** Downscale an image to fit `max` on its longest side, keeping its shape. */
+export async function shrinkImage(src, { max = 1280, quality = 0.8, type = 'image/webp', maxBytes = 0 } = {}) {
+  const img = await loadImage(src);
+  let scale = Math.min(1, max / Math.max(img.width || max, img.height || max));
+  let q = quality;
+  let out = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const w = Math.max(1, Math.round((img.width || max) * scale));
+    const h = Math.max(1, Math.round((img.height || max) * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, w, h);
+    out = canvasToDataUrl(canvas, type, q);
+    if (!maxBytes || out.length <= maxBytes) return { src: out, width: w, height: h };
+    q = Math.max(0.4, q - 0.12);
+    scale *= 0.82;
+  }
+  return { src: out, width: img.width, height: img.height };
+}
+
+/** Square avatar crop. Also stores a small `wire` copy for the relay. */
+export async function prepareAvatarFile(file, { size = 176 } = {}) {
+  if (!file) throw new Error('No file selected.');
+  if (!file.type.startsWith('image/')) throw new Error('That file is not an image.');
+  if (file.size > 12 * 1024 * 1024) throw new Error('That image is larger than 12 MB.');
+  const raw = await readFileAsDataURL(file);
+  const img = await loadImage(raw);
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const scale = Math.max(size / img.width, size / img.height);
+  const w = img.width * scale;
+  const h = img.height * scale;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+  const src = canvasToDataUrl(canvas, hasAlpha(file.type) ? 'image/webp' : 'image/jpeg', 0.85);
+
+  const small = document.createElement('canvas');
+  small.width = 96;
+  small.height = 96;
+  small.getContext('2d').drawImage(canvas, 0, 0, 96, 96);
+  const wire = canvasToDataUrl(small, 'image/webp', 0.72);
+  return { kind: 'image', src, wire, name: file.name || 'avatar', ts: Date.now() };
+}
+
+/** Build the small relay copy for an avatar that was saved before wiring up. */
+export async function ensureWireAvatar(avatar) {
+  if (!avatar || avatar.kind !== 'image' || !avatar.src) return avatar;
+  if (avatar.wire) return avatar;
+  try {
+    const small = await shrinkImage(avatar.src, { max: 96, quality: 0.72, maxBytes: 26000 });
+    return { ...avatar, wire: small.src };
+  } catch {
+    return avatar;
+  }
+}
+
+/**
+ * Prepare an uploaded picture for a message.
+ * GIFs keep their original bytes so the animation survives; everything else is
+ * downscaled and re-encoded to something the relay can carry.
+ */
+export async function prepareAttachment(file) {
+  if (!file) throw new Error('No file selected.');
+  const type = String(file.type || '');
+  if (!type.startsWith('image/')) throw new Error('That file is not an image.');
+
+  if (type === 'image/gif') {
+    if (file.size > 1.6 * 1024 * 1024) throw new Error('That GIF is larger than 1.6 MB — try a shorter one.');
+    const src = await readFileAsDataURL(file);
+    const img = await loadImage(src).catch(() => null);
+    return {
+      kind: 'gif',
+      src,
+      name: file.name || 'animation.gif',
+      width: img?.width || 0,
+      height: img?.height || 0,
+      bytes: src.length,
+      animated: true,
+    };
+  }
+
+  if (file.size > 20 * 1024 * 1024) throw new Error('That image is larger than 20 MB.');
+  const raw = await readFileAsDataURL(file);
+  const shrunk = await shrinkImage(raw, {
+    max: 1280,
+    quality: 0.82,
+    type: hasAlpha(type) ? 'image/webp' : 'image/jpeg',
+    maxBytes: 460_000,
+  });
+  return {
+    kind: 'image',
+    src: shrunk.src,
+    name: file.name || 'image',
+    width: shrunk.width,
+    height: shrunk.height,
+    bytes: shrunk.src.length,
+  };
 }

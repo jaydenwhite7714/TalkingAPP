@@ -133,6 +133,17 @@ class MqttTransport {
     }
   }
 
+  /** Retained messages survive on the broker, so a new device can pick them up. */
+  sendRetained(topic, payload) {
+    if (this.state !== 'online' || !this.client) return false;
+    try {
+      this.client.publish(`${CONFIG.room}/${topic}`, payload, { qos: 1, retain: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   close() {
     this.closed = true;
     try { this.client?.end(true); } catch {}
@@ -206,6 +217,14 @@ class RawWsTransport {
     try { this.ws.send(payload); return true; } catch { return false; }
   }
 
+  sendRetained(topic, payload) {
+    if (this.state !== 'online') return false;
+    try {
+      this.ws.send(JSON.stringify({ __ta_retain: true, topic, payload }));
+      return true;
+    } catch { return false; }
+  }
+
   close() {
     this.closed = true;
     clearTimeout(this.retryTimer);
@@ -239,6 +258,8 @@ class LocalTransport {
     if (this.state !== 'online' || !this.channel) return false;
     try { this.channel.postMessage(payload); return true; } catch { return false; }
   }
+
+  sendRetained() { return false; }
   close() { try { this.channel?.close(); } catch {} }
 }
 
@@ -270,6 +291,8 @@ export const net = {
   init({ profile, communities }) {
     this.profile = profile;
     this.communities = communities || [];
+    // the lock screen connects with a placeholder profile; swap it live later
+    if (this.started && profile?.id && profile.id !== 'lock') this.updateProfile(profile, this.communities);
     return this;
   },
 
@@ -345,7 +368,10 @@ export const net = {
 
   wireProfile() {
     const p = this.profile || {};
-    const av = p.avatar?.kind === 'image' ? null : p.avatar;
+    // image avatars travel as a 96px copy so other people actually see them
+    const av = p.avatar?.kind === 'image'
+      ? (p.avatar.wire ? { kind: 'image', src: p.avatar.wire } : null)
+      : p.avatar;
     return {
       id: p.id,
       displayName: p.displayName,
@@ -418,11 +444,22 @@ export const net = {
   },
 
   handlePacket(raw, transport) {
-    if (!raw || raw.length > 60000) return;
+    // chunks stay well under this; whole-vault frames can be a little larger
+    if (!raw || raw.length > 120000) return;
     let p;
     try { p = JSON.parse(raw); } catch { return; }
     if (!p || p.v !== 1 || !p.from?.id) return;
     if (p.sid === this.sid) return;              // our own echo
+
+    // system traffic (vault copies, username lookups) never becomes a "peer"
+    if (p.system || String(p.kind).startsWith('vault')) {
+      if (!remember(p.id)) return;
+      if (p.kind === 'vault-request') bus.emit('net:vault-request', p);
+      else if (p.kind === 'vault') bus.emit('net:vault', p);
+      else if (p.kind === 'handle-check') bus.emit('net:handle-check', p);
+      else if (p.kind === 'handle-taken') bus.emit('net:handle-taken', p);
+      return;
+    }
     if (p.from.id === this.profile?.id && p.sid !== this.sid) {
       // another tab signed in as the same profile — still show it, but don't DM yourself
     }
@@ -480,6 +517,9 @@ export const net = {
   },
 
   sendChat({ channelKey, channel, serverKey, serverName, serverTopic, channels, message, replyTo }) {
+    const att = message.attachment
+      ? { kind: message.attachment.kind, name: message.attachment.name, width: message.attachment.width, height: message.attachment.height, size: message.attachment.bytes || message.attachment.src?.length || 0 }
+      : null;
     return this.publish({
       kind: 'chat',
       key: serverKey,
@@ -489,8 +529,91 @@ export const net = {
       channel,
       msgId: message.id,
       text: message.text,
+      att,
       msgTs: message.ts,
       replyTo: replyTo ? { name: replyTo.displayName, text: replyTo.text.slice(0, 120) } : null,
+    });
+  },
+
+  /** Push a picture/GIF alongside a chat message, in relay-sized chunks. */
+  sendMedia({ serverKey, channel, msgId, attachment, to = null }) {
+    if (!attachment?.src) return 0;
+    const CHUNK = 15000;
+    const data = attachment.src;
+    const total = Math.ceil(data.length / CHUNK);
+    const meta = {
+      kind: attachment.kind || 'image',
+      name: attachment.name || 'image',
+      width: attachment.width || 0,
+      height: attachment.height || 0,
+    };
+    let sent = 0;
+    for (let part = 0; part < total; part++) {
+      sent += this.publish({
+        kind: to ? 'media-dm' : 'media',
+        key: serverKey,
+        channel,
+        to,
+        msgId,
+        part,
+        total,
+        meta,
+        data: data.slice(part * CHUNK, (part + 1) * CHUNK),
+      }) ? 1 : 0;
+    }
+    return sent;
+  },
+
+  /* ----------------------------- vault (cloud) ---------------------------- */
+
+  publishVault({ handle, parts, total, savedAt }) {
+    let sent = 0;
+    parts.forEach((data, part) => {
+      const packet = {
+        v: 1,
+        sid: 'vault',
+        id: randId(12),
+        ts: Date.now(),
+        system: true,
+        from: { id: 'vault', displayName: 'Vault' },
+        kind: 'vault',
+        handle,
+        part,
+        total,
+        savedAt,
+        data,
+      };
+      const json = JSON.stringify(packet);
+      for (const t of this.transports) {
+        if (t.kind === 'local') continue;
+        if (t.sendRetained?.(`vault/${handle}/${part}`, json) && t.state === 'online') sent++;
+      }
+    });
+    return sent;
+  },
+
+  requestVault(handle) {
+    return this.publish({ kind: 'vault-request', handle, system: true }, { noDedupe: true });
+  },
+
+  /** Ask everyone online whether a username is already in use. */
+  checkHandle(handle, { timeout = 1400 } = {}) {
+    const target = String(handle || '').toLowerCase();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        bus.off('net:handle-taken', onTaken);
+        resolve(value);
+      };
+      const onTaken = (p) => {
+        if (String(p.handle || '').toLowerCase() === target) finish({ taken: true, by: p.from?.displayName || null });
+      };
+      const timer = setTimeout(() => finish({ taken: false }), timeout);
+      bus.on('net:handle-taken', onTaken);
+      this.publish({ kind: 'handle-check', handle: target, system: true }, { noDedupe: true });
     });
   },
 

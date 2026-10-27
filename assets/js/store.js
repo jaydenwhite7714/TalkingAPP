@@ -5,6 +5,27 @@ import { defaultAvatar, AVATAR_COLORS } from './avatar.js';
 
 export const STORAGE_KEY = 'ta.state.v2';
 export const PROFILE_KEY = 'ta.profile';
+
+// Every account keeps its own copy of the state, so switching usernames on one
+// device never mixes two people's servers together.
+let CURRENT_KEY = STORAGE_KEY;
+let CURRENT_PROFILE_KEY = PROFILE_KEY;
+let CURRENT_HANDLE = null;
+
+export function accountStateKey(handle) {
+  return handle ? `${STORAGE_KEY}.${String(handle).toLowerCase()}` : STORAGE_KEY;
+}
+
+export function useAccountNamespace(handle) {
+  CURRENT_HANDLE = handle ? String(handle).toLowerCase() : null;
+  CURRENT_KEY = accountStateKey(CURRENT_HANDLE);
+  CURRENT_PROFILE_KEY = CURRENT_HANDLE ? `${PROFILE_KEY}.${CURRENT_HANDLE}` : PROFILE_KEY;
+  return CURRENT_KEY;
+}
+
+export function currentNamespace() {
+  return { handle: CURRENT_HANDLE, stateKey: CURRENT_KEY, profileKey: CURRENT_PROFILE_KEY };
+}
 const MAX_MSGS = 120;
 
 const DEFAULT_SETTINGS = {
@@ -86,13 +107,13 @@ export function save() {
     ui: { activeServerId: state.ui.activeServerId, activeChannelId: state.ui.activeChannelId, lastChannelByServer: state.ui.lastChannelByServer },
     savedAt: Date.now(),
   };
-  const ok = storage.set(STORAGE_KEY, payload);
+  const ok = storage.set(CURRENT_KEY, payload);
   if (!ok) {
     // most likely quota — trim the heaviest part and retry once
     payload.messages = Object.fromEntries(Object.entries(messages).map(([k, v]) => [k, v.slice(-30)]));
-    storage.set(STORAGE_KEY, payload);
+    storage.set(CURRENT_KEY, payload);
   }
-  storage.set(PROFILE_KEY, self);
+  storage.set(CURRENT_PROFILE_KEY, self);
 }
 
 /** Persist immediately (used before unload). */
@@ -110,7 +131,12 @@ export function toast(message, kind = 'info', opts = {}) {
 /* --------------------------------- boot ---------------------------------- */
 
 export function load() {
-  const saved = storage.get(STORAGE_KEY, null);
+  let saved = storage.get(CURRENT_KEY, null);
+  // one-time migration from the pre-account single-slot format
+  if (!saved && CURRENT_HANDLE) {
+    const legacy = storage.get(STORAGE_KEY, null);
+    if (legacy?.self && String(legacy.self.handle).toLowerCase() === CURRENT_HANDLE) saved = legacy;
+  }
   if (!saved || !saved.self?.id) return false;
 
   state.self = normalizeSelf(saved.self);
@@ -240,11 +266,43 @@ export function updateSelf(patch) {
   return { ok: true, self: state.self };
 }
 
+/** Lock the app. Your account, data and cloud copy all stay put. */
 export function signOut() {
   flush();
-  storage.remove(STORAGE_KEY);
-  storage.remove(PROFILE_KEY);
   location.reload();
+}
+
+/** Remove this device's copy of everything, including the account. */
+export function wipeDevice() {
+  for (const key of [CURRENT_KEY, CURRENT_PROFILE_KEY, STORAGE_KEY, PROFILE_KEY, 'ta.account.v1', 'ta.vault.v1', 'ta.claims.v1']) {
+    storage.remove(key);
+  }
+  location.reload();
+}
+
+/* ------------------------------- ownership ------------------------------- */
+
+export function isServerOwner(server) {
+  if (!server) return false;
+  if (!server.ownerId) return false;
+  return server.ownerId === state.self?.id;
+}
+
+/** Servers you created — or a starter server nobody owns — are editable. */
+export function canManageServer(server, user = state.self) {
+  if (!server || !user) return false;
+  if (server.ownerId) return server.ownerId === user.id;
+  return false;
+}
+
+export function canManageChannel(channelId, user = state.self) {
+  const ch = state.channels[channelId];
+  if (!ch) return false;
+  return canManageServer(state.servers[ch.serverId], user);
+}
+
+function ownershipError(what = 'server') {
+  return { ok: false, error: `Only the owner can change this ${what}.` };
 }
 
 /* -------------------------------- servers -------------------------------- */
@@ -286,7 +344,7 @@ function bootstrapServers() {
       color: def.color,
       emoji: def.emoji,
       networkKey: def.networkKey,
-      ownerId: state.self.id,
+      ownerId: null,
       isPublic: true,
       isStarter: true,
       createdAt: Date.now(),
@@ -486,6 +544,7 @@ export function joinNetworkCommunity({ name, key, channels = [] }) {
 export function updateServer(id, patch) {
   const s = state.servers[id];
   if (!s) return { ok: false, error: 'Server not found.' };
+  if (!canManageServer(s)) return ownershipError('server');
   if (patch.name != null) {
     const r = validateServerName(patch.name);
     if (!r.ok) return { ok: false, error: r.error };
@@ -503,7 +562,8 @@ export function updateServer(id, patch) {
 
 export function deleteServer(id) {
   const s = state.servers[id];
-  if (!s) return;
+  if (!s) return { ok: false, error: 'Server not found.' };
+  if (!canManageServer(s)) return ownershipError('server');
   for (const cid of s.channelIds) {
     delete state.channels[cid];
     delete state.messages[cid];
@@ -537,6 +597,7 @@ export function leaveServer(id) {
 export function createChannel(serverId, name, topic = '') {
   const s = state.servers[serverId];
   if (!s) return { ok: false, error: 'Server not found.' };
+  if (!canManageServer(s)) return ownershipError('server');
   const r = validateChannelName(name);
   if (!r.ok) return { ok: false, error: r.error };
   if (s.channelIds.some((cid) => state.channels[cid].name === r.value)) {
@@ -554,6 +615,7 @@ export function createChannel(serverId, name, topic = '') {
 export function updateChannel(channelId, patch) {
   const ch = state.channels[channelId];
   if (!ch) return { ok: false, error: 'Channel not found.' };
+  if (!canManageChannel(channelId)) return ownershipError('channel');
   if (patch.name != null) {
     const r = validateChannelName(patch.name);
     if (!r.ok) return { ok: false, error: r.error };
@@ -568,7 +630,8 @@ export function updateChannel(channelId, patch) {
 
 export function deleteChannel(channelId) {
   const ch = state.channels[channelId];
-  if (!ch) return;
+  if (!ch) return { ok: false, error: 'Channel not found.' };
+  if (!canManageChannel(channelId)) return ownershipError('channel');
   const s = state.servers[ch.serverId];
   if (!s) return;
   const remaining = s.channelIds.filter((id) => id !== channelId);
@@ -1040,10 +1103,99 @@ export function persistNow() {
   save();
 }
 
+/* -------------------------------- snapshots ------------------------------ */
+
+/** Everything worth saving: profile, servers, channels, history, DMs, settings. */
+export function snapshotState() {
+  const messages = {};
+  for (const [cid, list] of Object.entries(state.messages)) {
+    const msgs = list
+      .filter((m) => !m.pending)
+      .slice(-120)
+      .map((m) => ({
+        ...m,
+        // keep the file small: oversized inline avatars fall back to a colour
+        avatar: m.avatar?.kind === 'image' && (m.avatar.src || '').length > 40000
+          ? { kind: 'color', color: m.accentColor || AVATAR_COLORS[0], initials: m.avatar.initials || null }
+          : m.avatar,
+      }));
+    if (msgs.length) messages[cid] = msgs;
+  }
+  return {
+    v: 3,
+    handle: state.self?.handle || null,
+    self: state.self,
+    users: Object.fromEntries(Object.entries(state.users).filter(([id]) => id !== state.self?.id).slice(0, 200)),
+    servers: state.servers,
+    channels: state.channels,
+    messages,
+    reads: state.reads,
+    dmChannels: state.dmChannels,
+    settings: state.settings,
+    blocked: state.blocked,
+    ui: { activeServerId: state.ui.activeServerId, activeChannelId: state.ui.activeChannelId, lastChannelByServer: state.ui.lastChannelByServer },
+    savedAt: Date.now(),
+  };
+}
+
+export function applySnapshot(snap, { replaceLocal = true } = {}) {
+  if (!snap?.self) throw new Error('That backup has no profile in it.');
+  const previousHandle = state.self?.handle || null;
+  state.self = normalizeSelf(snap.self);
+  state.users = { ...(snap.users || {}) };
+  state.users[state.self.id] = state.self;
+  state.servers = snap.servers || {};
+  state.channels = snap.channels || {};
+  state.messages = snap.messages || {};
+  state.reads = snap.reads || {};
+  state.dmChannels = snap.dmChannels || {};
+  state.blocked = snap.blocked || {};
+  state.settings = { ...DEFAULT_SETTINGS, ...(snap.settings || {}) };
+
+  for (const srv of Object.values(state.servers)) {
+    srv.channelIds = (srv.channelIds || []).filter((id) => state.channels[id]);
+    if (!srv.channelIds.length) {
+      const ch = createChannelRecord(srv.id, 'general', '');
+      state.channels[ch.id] = ch;
+      srv.channelIds.push(ch.id);
+    }
+    srv.defaultChannelId = srv.channelIds.includes(srv.defaultChannelId) ? srv.defaultChannelId : srv.channelIds[0];
+    srv.networkKey = srv.networkKey || networkKeyFor(srv.name);
+  }
+  if (!state.ui || !state.ui.activeServerId) {
+    state.ui.activeServerId = snap.ui?.activeServerId && state.servers[snap.ui.activeServerId] ? snap.ui.activeServerId : Object.keys(state.servers)[0] || '@me';
+    state.ui.activeChannelId = state.channels[snap.ui?.activeChannelId] ? snap.ui.activeChannelId : null;
+  }
+  const firstServer = state.ui.activeServerId && state.ui.activeServerId !== '@me' ? state.servers[state.ui.activeServerId] : null;
+  if (!state.ui.activeChannelId && firstServer) state.ui.activeChannelId = firstServer.defaultChannelId;
+
+  state.ready = true;
+  if (replaceLocal) persistNow();
+  if (previousHandle && previousHandle !== state.self.handle) {
+    storage.remove(`${PROFILE_KEY}.${previousHandle}`);
+  }
+  bus.emit('identity:created', state.self);
+  bus.emit('servers:changed');
+  bus.emit('channels:changed');
+  bus.emit('dms:changed');
+  bus.emit('settings:changed', { key: 'all' });
+  bus.emit('active:changed');
+  return state;
+}
+
+/** Attach a downloaded image/GIF to a message that already exists. */
+export function setMessageAttachment(channelId, msgId, attachment) {
+  const m = state.messages[channelId]?.find((x) => x.id === msgId);
+  if (!m) return null;
+  m.attachment = attachment;
+  m.attachmentDropped = false;
+  persist();
+  bus.emit('message:updated', { channelId, message: m });
+  return m;
+}
+
 export function resetEverything() {
-  storage.remove(STORAGE_KEY);
-  storage.remove(PROFILE_KEY);
-  location.reload();
+  wipeDevice();
 }
 
 export { DEFAULT_SETTINGS, createChannelRecord };
