@@ -886,9 +886,24 @@ function installShortcuts() {
 
 /* -------------------------------- listeners ------------------------------- */
 
+/** Channels can look empty on a fresh device until someone replays history. */
+const historyRequested = new Map();
+function askForHistoryIfQuiet(ch) {
+  if (!ch || !ch.serverId) return;
+  const server = state.servers[ch.serverId];
+  if (!server) return;
+  const visible = (state.messages[ch.id] || []).filter((m) => !m.system).length;
+  if (visible > 1) return;
+  const last = historyRequested.get(ch.id) || 0;
+  if (Date.now() - last < 15000) return;
+  historyRequested.set(ch.id, Date.now());
+  net.requestHistory({ serverKey: server.networkKey });
+}
+
 bus.on('active:changed', () => {
   const ch = activeChannel();
   openChannelView(ch ? ch.id : null);
+  if (ch && net.status() === 'online') setTimeout(() => askForHistoryIfQuiet(ch), 700);
   if (ch) {
     try { window.history.replaceState(null, '', `#/channel/${ch.id}`); } catch {}
     if (window.matchMedia('(max-width: 860px)').matches) {
