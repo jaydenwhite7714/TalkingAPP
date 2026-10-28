@@ -179,6 +179,22 @@ tools/
 404.html                   branded not-found page
 ```
 
+## Tests
+
+```bash
+npm test              # module graph + required files (fast, no browser)
+npm run test:logic    # roles, plans, vault trimming, history digests (jsdom)
+npm run test:ui       # boots the real app: sign-up, lock screen, roles, plans
+PORT=8081 npm run relay &   # the two live suites need a relay
+npm run test:relay    # retained history/cards/vault against the relay
+npm run test:realtime # the app + a second player over real WebSockets
+```
+
+The live suites boot the actual app in jsdom, connect it to `tools/relay/server.mjs`
+with a real socket, and check that a second person's messages arrive, that replies
+travel back, and that a **third** client connecting afterwards receives the retained
+channel digest and server card.
+
 ## Keyboard shortcuts
 
 | Keys | Action |
