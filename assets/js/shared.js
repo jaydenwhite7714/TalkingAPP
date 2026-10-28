@@ -191,9 +191,13 @@ export function initShared() {
   bus.on('channels:changed', () => { for (const s of Object.values(state.servers)) scheduleServerCard(s); });
   bus.on('members:changed', (serverId) => { if (serverId) scheduleServerCard(serverId); });
 
+  let lastOnlinePublish = 0;
   bus.on('net:status', ({ status }) => {
     if (status !== 'online') return;
-    // a reconnected relay may have restarted: put our public rooms back
+    // a reconnected relay may have restarted: put our public rooms back, but
+    // never more than once every half minute on a flapping connection
+    if (Date.now() - lastOnlinePublish < 30000) return;
+    lastOnlinePublish = Date.now();
     setTimeout(publishAllNow, 900);
   });
   bus.on('vault:restored', () => setTimeout(publishAllNow, 700));
