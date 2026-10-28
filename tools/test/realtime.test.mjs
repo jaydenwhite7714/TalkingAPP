@@ -157,6 +157,68 @@ await t.test('the server card was published with its real name and owner', async
   if (!card.card.channels.some((c) => c.name === 'general')) throw new Error('card has no channels');
 });
 
+await t.test('an invite-only server sends nothing to the shared room', async () => {
+  const priv = store.createServer({ name: 'Private Plans', visibility: 'invite', channels: ['general'] });
+  if (!priv.ok) throw new Error(priv.error);
+  const ch = priv.server.channelIds.map((id) => store.state.channels[id])[0];
+  store.addMessage(ch.id, store.makeMessage({
+    channelId: ch.id, userId: store.state.self.id, displayName: 'Relay Kid', handle: HANDLE,
+    text: 'nobody else should see this', isSelf: true,
+  }));
+
+  const { publishAllNow } = await import(`${ROOT}/assets/js/shared.js`);
+  publishAllNow();
+  await sleep(1200);
+
+  const watcher = new WsClient(RELAY);
+  await new Promise((res, rej) => { watcher.on('open', res); watcher.on('error', rej); });
+  const frames = [];
+  watcher.on('message', (d) => frames.push(d.toString()));
+  await sleep(900);
+  watcher.close();
+
+  const key = priv.server.networkKey;
+  const leaked = frames.filter((f) => f.includes(key) || f.includes('nobody else should see this'));
+  if (leaked.length) throw new Error(`private server leaked ${leaked.length} frame(s) to the relay`);
+  // sanity: the public server is still being published
+  if (!frames.some((f) => f.includes(srv.networkKey))) throw new Error('public history stopped publishing');
+});
+
+await t.test('rotating the invite link moves everyone and tells the room', async () => {
+  const priv = store.createServer({ name: 'Rotating Room', visibility: 'invite', channels: ['general'] });
+  if (!priv.ok) throw new Error(priv.error);
+  const oldKey = priv.server.networkKey;
+
+  // watch the wire before rotating
+  const watcher = new WsClient(RELAY);
+  await new Promise((res, rej) => { watcher.on('open', res); watcher.on('error', rej); });
+  const frames = [];
+  watcher.on('message', (d) => frames.push(d.toString()));
+  await sleep(200);
+
+  const res = store.rotateInviteLink(priv.server.id);
+  if (!res.ok) throw new Error(res.error);
+  if (res.nextKey === oldKey) throw new Error('the key did not change');
+
+  await sleep(700);
+  watcher.close();
+
+  const rekey = frames.map((f) => { try { return JSON.parse(f); } catch { return null; } })
+    .find((p) => p?.kind === 'rekey');
+  if (!rekey) throw new Error('the room was never told about the new key');
+  if (rekey.oldKey !== oldKey || rekey.nextKey !== res.nextKey) throw new Error('the rekey carried the wrong keys');
+
+  // another member's device, still holding the old key
+  const mirror = store.joinByInvite({ key: oldKey, name: 'Rotating Room' });
+  if (!mirror.ok) throw new Error(mirror.error);
+  if (mirror.server.networkKey !== oldKey) throw new Error('the mirror did not take the old key');
+
+  const moved = store.applyRekey({ oldKey, nextKey: res.nextKey });
+  if (!moved.ok) throw new Error('an existing member could not follow');
+  if (moved.server.networkKey !== res.nextKey) throw new Error('the member kept the old key');
+  if (store.isListed(moved.server)) throw new Error('rotating made it public');
+});
+
 await t.test('the app never logged a console error while doing all that', () => {
   const real = errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom/i.test(e));
   if (real.length) throw new Error(real.slice(0, 3).join(' | '));

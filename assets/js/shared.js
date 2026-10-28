@@ -19,7 +19,8 @@ import { bus } from './bus.js';
 import { net } from './net.js';
 import {
   state, logEntriesFor, mergeRemoteEntries, ingestServerCard, serverCardFor,
-  tombstonesFor, currentPlan, canManageServer, noteRemoteCommunity,
+  tombstonesFor, currentPlan, canManageServer, noteRemoteCommunity, isListed,
+  applyRekey,
 } from './store.js';
 import { limitsFor } from './plans.js';
 
@@ -49,6 +50,8 @@ function channelDigest(channelId) {
   if (!channel || channel.type === 'dm' || !channel.serverId) return null;
   const server = state.servers[channel.serverId];
   if (!server?.networkKey) return null;
+  // Invite-only servers keep their history off the shared room entirely.
+  if (!isListed(server)) return null;
   const limit = Math.min(120, limitsFor(currentPlan().id).logEntries);
   const entries = logEntriesFor(channelId, limit);
   const removed = tombstonesFor(channelId);
@@ -82,7 +85,7 @@ export function publishChannelLogNow(channelId) {
 /** Publish the authoritative card for a server we actually run. */
 export function scheduleServerCard(server) {
   const srv = typeof server === 'string' ? state.servers[server] : server;
-  if (!srv || !srv.isPublic || srv.isRemote) return;
+  if (!srv || !isListed(srv) || srv.isRemote) return;
   if (!canManageServer(srv)) return;
   clearTimeout(cardTimers.get(srv.id));
   cardTimers.set(srv.id, setTimeout(() => {
@@ -94,11 +97,27 @@ export function scheduleServerCard(server) {
 
 export function publishAllNow() {
   for (const s of Object.values(state.servers)) {
-    if (s.isPublic && !s.isRemote && canManageServer(s)) net.publishServerCard(serverCardFor(s));
+    if (isListed(s) && !s.isRemote && canManageServer(s)) net.publishServerCard(serverCardFor(s));
   }
   for (const [cid, ch] of Object.entries(state.channels)) {
     if (ch?.serverId) publishChannelLogNow(cid);
   }
+}
+
+/**
+ * Send a card straight to one person. Invite-only servers use this instead of
+ * the shared room, so their name and channels never leak to strangers.
+ */
+export function sendCardTo(peerId, server) {
+  const srv = typeof server === 'string' ? state.servers[server] : server;
+  if (!srv || !peerId) return 0;
+  return net.sendServerCard({ to: peerId, card: serverCardFor(srv) });
+}
+
+/** Tell everybody inside an invite-only server that its key moved. */
+export function announceRekey({ oldKey, nextKey, serverId }) {
+  if (!oldKey || !nextKey) return 0;
+  return net.sendRekey({ oldKey, nextKey, serverId });
 }
 
 /* ------------------------------- receiving ------------------------------- */
@@ -123,6 +142,7 @@ function applyLogPacket(p) {
 }
 
 function applyCardPacket(p) {
+  if (p?.to && p.to !== state.self?.id) return;
   const card = p?.card;
   if (!card?.key) return;
   const prev = cards.get(card.key);
@@ -177,6 +197,15 @@ export function initShared() {
 
   bus.on('net:log', applyLogPacket);
   bus.on('net:server-card', applyCardPacket);
+  bus.on('net:rekey', (p) => {
+    if (p.from?.id === state.self?.id) return;
+    const res = applyRekey({ oldKey: p.oldKey, nextKey: p.nextKey });
+    if (res.ok) {
+      bus.emit('server:rekeyed', { server: res.server });
+      // republish under the new key once things have settled
+      setTimeout(publishAllNow, 800);
+    }
+  });
 
   // republish whenever the thing we are the source of truth for changes
   bus.on('message:new', ({ channelId }) => scheduleChannelLog(channelId));

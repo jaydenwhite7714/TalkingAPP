@@ -8,7 +8,8 @@ import {
   pinnedMessages, toast, searchAll, unreadCount, joinNetworkCommunity, signOut, resetEverything,
   flush, persistNow, networkKeyFor, activeChannel, canManageServer,
   memberList, setMemberRole, currentPlan, setPlan, canAssignRolesIn, forgetServer,
-  isServerOwner, roleOf, setServerNotify,
+  isServerOwner, roleOf, setServerNotify, blockedList, unblockUser, inviteLinkFor,
+  setServerVisibility, rotateInviteLink, isListed,
 } from '../store.js';
 import { PLANS, DEMO_NOTE, planOf, planBadgeHTML, limitsFor } from '../plans.js';
 import { roleChipHTML, assignableRoles, roleRecord } from '../perms.js';
@@ -78,6 +79,19 @@ export function openCreateServer() {
   descInput.addEventListener('input', updatePreview);
 
   const err = el('div', { class: 'form-error', hidden: true });
+  let inviteOnly = false;
+  const accessSwitch = el('button', {
+    class: 'switch', type: 'button', role: 'switch', 'aria-checked': 'false',
+    'aria-label': 'Invite-only server',
+    onclick: (e) => {
+      inviteOnly = e.currentTarget.getAttribute('aria-checked') !== 'true';
+      e.currentTarget.setAttribute('aria-checked', String(inviteOnly));
+      accessHint.textContent = inviteOnly
+        ? 'Hidden from Explore. People can only get in with your invite link, which carries a secret key.'
+        : 'Listed in Explore with your description, so anyone online can drop in.';
+    },
+  });
+  const accessHint = el('div', { class: 'form-help', text: 'Listed in Explore with your description, so anyone online can drop in.' });
 
   const content = el('div', { class: 'modal-body pad' },
     el('div', { class: 'form-group' }, previewHolder),
@@ -92,10 +106,11 @@ export function openCreateServer() {
       el('span', { class: 'form-label', text: 'Icon' }), emojiRow),
     el('div', { class: 'form-group' },
       el('span', { class: 'form-label', text: 'Color' }), swatches),
-    el('label', { class: 'row', style: { gap: '10px', cursor: 'pointer', padding: '4px 0' } },
-      el('span', { class: 'pill accent', text: 'PUBLIC' }),
-      el('span', { style: { fontSize: '12.5px', color: 'var(--text-2)' }, text: 'List this server in Explore and let anyone join' }),
-    ),
+    el('div', { class: 'setting-row', style: { borderTop: '1px solid var(--border)', paddingLeft: '0', paddingRight: '0' } },
+      el('div', { class: 'sr-text' },
+        el('div', { class: 'sr-title', text: 'Invite-only' }),
+        accessHint),
+      accessSwitch),
     err,
   );
 
@@ -108,6 +123,7 @@ export function openCreateServer() {
           desc: descInput.value,
           color,
           emoji,
+          visibility: inviteOnly ? 'invite' : 'public',
           channels: [chanInput.value || 'general'],
         });
         if (!res.ok) {
@@ -118,7 +134,8 @@ export function openCreateServer() {
           return;
         }
         ref.close();
-        toast(`${res.server.name} created`, 'party', { duration: 2600 });
+        toast(`${res.server.name} created — ${inviteOnly ? 'invite-only' : 'listed in Explore'}`, 'party', { duration: 2600 });
+        if (inviteOnly) setTimeout(() => openInvite(res.server), 420);
       },
     }, icon('plus', 16), 'Create server'),
   );
@@ -246,9 +263,8 @@ export function deleteChannelFlow(ch) {
 
 export function openInvite(server) {
   const base = `${location.origin}${location.pathname}`;
-  const joinUrl = server
-    ? `${base}?join=${encodeURIComponent(server.networkKey)}&name=${encodeURIComponent(server.name)}`
-    : `${base}`;
+  const canRotate = server ? canManageServer(server) || isServerOwner(server) : false;
+  const joinUrl = server ? inviteLinkFor(server) : base;
 
   const makeRow = (value, label, primary) => el('div', { class: 'share-block', style: { marginBottom: '9px' } },
     icon(primary ? 'userPlus' : 'link', 15),
@@ -264,17 +280,48 @@ export function openInvite(server) {
     }, icon('copy', 14), el('span', { text: 'Copy' })),
   );
 
+  const privateServer = server ? !isListed(server) : false;
   const linkRow = el('div', {},
-    server ? el('div', { class: 'section-title', text: 'Server invite — lands them inside this server' }) : null,
+    server ? el('div', { class: 'section-title', text: privateServer ? 'Invite link — the only way in' : 'Server invite — lands them inside this server' }) : null,
     server ? makeRow(joinUrl, 'Server invite', true) : null,
     el('div', { class: 'section-title', style: { marginTop: server ? '14px' : '0' }, text: 'Plain link — opens TalkingApp' }),
     makeRow(base, 'Link', false),
   );
 
+  const visibilityRow = server && canRotate ? el('div', { class: 'setting-block' },
+    el('div', { class: 'sr-title', text: 'Who can join' }),
+    el('div', { class: 'sr-desc', style: { marginBottom: '9px' }, text: privateServer
+      ? 'Invite-only: this server is not in Explore, and its key is random so nobody can guess it from the name.'
+      : 'Listed: this server shows up in Explore for everyone online.' }),
+    el('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } },
+      el('button', {
+        class: `btn btn-sm ${privateServer ? 'btn-secondary' : 'btn-primary'}`, type: 'button',
+        onclick: () => {
+          const res = setServerVisibility(server.id, privateServer ? 'public' : 'invite');
+          if (!res.ok) { toast(res.error, 'error'); return; }
+          toast(privateServer ? 'Listed in Explore again' : 'Now invite-only — the old link is dead', 'ok', { duration: 3600 });
+          ref.close();
+          openInvite(state.servers[server.id] || server);
+        },
+      }, icon(privateServer ? 'globe' : 'lock', 14), privateServer ? 'Make it public' : 'Make it invite-only'),
+      privateServer ? el('button', {
+        class: 'btn btn-secondary btn-sm', type: 'button',
+        onclick: () => {
+          const res = rotateInviteLink(server.id);
+          if (!res.ok) { toast(res.error, 'error'); return; }
+          toast('New link created — share it again', 'ok', { duration: 3600 });
+          ref.close();
+          openInvite(state.servers[server.id] || server);
+        },
+      }, icon('link', 14), 'New link') : null,
+    ),
+  ) : null;
+
   const content = el('div', { class: 'modal-body pad' },
     el('p', { class: 'muted', style: { fontSize: '13.5px', lineHeight: '1.55', marginBottom: '14px' },
       text: `Anyone who opens this link can talk to you in real time. ${server ? `They will show up in ${server.name}’s member list as soon as they arrive.` : ''}` }),
     linkRow,
+    visibilityRow,
     el('div', { class: 'section-title', style: { marginTop: '18px' }, text: 'Ways to invite' }),
     el('div', { class: 'tip-card' },
       el('div', { class: 'tip-ico' }, icon('wifi', 15)),
@@ -282,8 +329,10 @@ export function openInvite(server) {
         el('p', { text: 'The plain link works on any device. The server invite puts them straight into this server with its channels.' }))),
     el('div', { class: 'tip-card' },
       el('div', { class: 'tip-ico' }, icon('lock', 15)),
-      el('div', {}, el('b', { text: 'Keep it public-safe' }),
-        el('p', { text: 'Messages travel through a public relay server. Do not share passwords or private info.' }))),
+      el('div', {}, el('b', { text: privateServer ? 'Invite-only is unlisted, not encrypted' : 'Keep it public-safe' }),
+        el('p', { text: privateServer
+          ? 'Nobody can find this server or join without the link. The relay is still shared infrastructure though, so treat it like a quiet room, not a vault.'
+          : 'Messages travel through a public relay server. Do not share passwords or private info.' }))),
     el('div', { class: 'tip-card' },
       el('div', { class: 'tip-ico' }, icon('wifi', 15)),
       el('div', {}, el('b', { text: 'Want a quieter room?' }),
@@ -321,7 +370,7 @@ export function openServerSettings(server) {
   const descInput = el('input', { class: 'input', maxlength: '180', value: server.desc || '' });
   let color = server.color || '#5865f2';
   let emoji = server.emoji || null;
-  let isPublic = server.isPublic !== false;
+  let isPublic = isListed(server);
 
   const swatches = el('div', { class: 'swatches' });
   for (const c of AVATAR_COLORS) {
@@ -350,13 +399,26 @@ export function openServerSettings(server) {
     });
     emojiRow.append(b);
   }
+  const accessNote = el('div', { class: 'sr-desc' });
   const publicSwitch = el('button', {
     class: 'switch', type: 'button', role: 'switch', 'aria-checked': String(isPublic),
+    'aria-label': 'List this server in Explore',
     onclick: (e) => {
-      isPublic = !isPublic;
-      e.currentTarget.setAttribute('aria-checked', String(isPublic));
+      const next = e.currentTarget.getAttribute('aria-checked') !== 'true';
+      const res = setServerVisibility(server.id, next ? 'public' : 'invite');
+      if (!res.ok) { toast(res.error, 'error'); return; }
+      isPublic = next;
+      e.currentTarget.setAttribute('aria-checked', String(next));
+      accessNote.textContent = next
+        ? 'Anyone online can find and join it.'
+        : 'Unlisted. It has a new random key, so only your invite link works.';
+      toast(next ? 'Listed in Explore' : 'Invite-only from now on', 'ok', { duration: 3600 });
+      if (!next) setTimeout(() => { ref.close(); openInvite(state.servers[server.id] || server); }, 500);
     },
   });
+  accessNote.textContent = isPublic
+    ? 'Anyone online can find and join it.'
+    : 'Unlisted. It has a new random key, so only your invite link works.';
 
   const holder = el('div', { class: 'banner-upload' });
   function updateHolder() {
@@ -428,8 +490,29 @@ export function openServerSettings(server) {
     el('div', { class: 'setting-row', style: { borderTop: '1px solid var(--border)' } },
       el('div', { class: 'sr-text' },
         el('div', { class: 'sr-title', text: 'List in Explore' }),
-        el('div', { class: 'sr-desc', text: 'Show this community to everyone online so they can join.' })),
+        accessNote),
       publicSwitch),
+    el('div', { class: 'setting-row' },
+      el('div', { class: 'sr-text' },
+        el('div', { class: 'sr-title', text: isPublic ? 'Invite link' : 'Invite link (keep it private)' }),
+        el('div', { class: 'sr-desc', text: isPublic
+          ? 'Public servers can be joined by name too — the link is just convenient.'
+          : 'Rotate it to lock out anyone holding the old one. Everyone already inside follows automatically.' })),
+      el('div', { class: 'row', style: { gap: '7px' } },
+        el('button', {
+          class: 'btn btn-sm btn-secondary', type: 'button',
+          onclick: () => { ref.close(); openInvite(server); },
+        }, icon('userPlus', 13), 'Invite'),
+        isPublic ? null : el('button', {
+          class: 'btn btn-sm btn-secondary', type: 'button',
+          onclick: () => {
+            const res = rotateInviteLink(server.id);
+            if (!res.ok) { toast(res.error, 'error'); return; }
+            toast('New invite link — the old one is dead', 'ok', { duration: 3600 });
+            ref.close();
+            openInvite(state.servers[server.id] || server);
+          },
+        }, icon('link', 13), 'Rotate'))),
     el('div', { class: 'setting-row' },
       el('div', { class: 'sr-text' },
         el('div', { class: 'sr-title', text: 'Notifications for you' }),
@@ -458,7 +541,7 @@ export function openServerSettings(server) {
       el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => ref.close() }, 'Cancel'),
       el('button', {
         class: 'btn btn-primary', type: 'button', onclick: () => {
-          const res = updateServer(server.id, { name: nameInput.value, desc: descInput.value, color, emoji, isPublic });
+          const res = updateServer(server.id, { name: nameInput.value, desc: descInput.value, color, emoji });
           if (!res.ok) { toast(res.error, 'error'); return; }
           ref.close();
           toast('Server updated', 'ok');
@@ -855,6 +938,7 @@ const NAV = [
   { id: 'backup', label: 'Backup & sync', icon: 'uploadCloud' },
   { id: 'profile', label: 'Profile', icon: 'edit' },
   { id: 'plans', label: 'Plans', icon: 'sparkle' },
+  { id: 'blocked', label: 'Blocked users', icon: 'shield' },
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'notifications', label: 'Notifications', icon: 'bell' },
   { id: 'network', label: 'Network', icon: 'wifi' },
@@ -896,6 +980,7 @@ export function openSettings(tab = MODAL_TAB.lastSettingsTab || 'account') {
     else if (id === 'backup') content.append(backupTab());
     else if (id === 'profile') content.append(profileTab());
     else if (id === 'plans') content.append(plansTab());
+    else if (id === 'blocked') content.append(blockedTab());
     else if (id === 'appearance') content.append(appearanceTab());
     else if (id === 'notifications') content.append(notificationsTab());
     else if (id === 'network') content.append(networkTab());
@@ -1294,6 +1379,55 @@ function plansTab() {
   return wrap;
 }
 
+function blockedTab() {
+  const wrap = el('div', {});
+  const list = blockedList();
+  const body = el('div', {});
+
+  const render = () => {
+    body.replaceChildren();
+    const people = blockedList();
+    if (!people.length) {
+      body.append(el('div', { class: 'sync-card' },
+        el('div', { class: 'sync-ico', html: iconHTML('shield', 18) }),
+        el('div', {}, el('b', { text: 'Nobody is blocked' }),
+          el('span', { text: 'Block someone from their profile card, or from a message they sent. Their messages disappear for you and they cannot message you.' }))));
+      return;
+    }
+    for (const person of people) {
+      body.append(el('div', { class: 'member-admin-row' },
+        el('span', { class: 'ma-avatar', html: avatarHTML({ displayName: person.name, avatar: defaultAvatar(person.name), accentColor: '#6b7280' }, { size: 30 }) }),
+        el('div', { class: 'ma-name' },
+          el('b', { text: person.name }),
+          el('span', { text: person.handle ? `@${person.handle}` : 'blocked' })),
+        el('button', {
+          class: 'btn btn-secondary btn-sm', type: 'button',
+          onclick: () => {
+            const res = unblockUser(person.id);
+            if (!res.ok) { toast(res.error, 'error'); return; }
+            toast(`${person.name} unblocked`, 'ok');
+            render();
+          },
+        }, icon('check', 14), 'Unblock')));
+    }
+  };
+  render();
+
+  wrap.append(
+    el('h3', { text: 'Blocked users' }),
+    el('p', { class: 'sc-sub', text: 'Blocking is private: nobody is told, and their messages are hidden rather than deleted.' }),
+    body,
+    el('div', { class: 'setting-block', style: { marginTop: '16px' } },
+      el('div', { class: 'sr-title', text: 'What blocking does' }),
+      el('ul', { class: 'bullets' },
+        el('li', { text: 'Their messages and direct messages stop showing up for you — the history is kept, so unblocking brings it back.' }),
+        el('li', { text: 'You stop getting sounds, pop-ups and unread badges from them.' }),
+        el('li', { text: 'You cannot send them a direct message while they are blocked; the composer offers an unblock button instead.' }),
+        el('li', { text: 'They are not told, and their own view of the conversation does not change.' }))),
+  );
+  return wrap;
+}
+
 function appearanceTab() {
   const wrap = el('div', {},
     el('h3', { text: 'Appearance' }),
@@ -1491,11 +1625,11 @@ function aboutTab() {
     el('div', { class: 'setting-block' },
       el('div', { class: 'sr-title', text: "What's new in this build" }),
       el('ul', { class: 'bullets' },
+        el('li', { text: 'Blocking works: blocked people are hidden everywhere, stop sending you sounds and badges, and unblocking restores the history.' }),
+        el('li', { text: 'Invite-only servers: unlisted, with a random key instead of one you could guess from the name. Rotate the link to lock out anyone who has the old one.' }),
+        el('li', { text: 'Message rules are enforced in the data layer: only the author can edit, and only the author or a moderator can delete or pin.' }),
         el('li', { text: 'Roles: owner, admin, moderator, member and read-only — checked before anything is changed, and on the wire.' }),
-        el('li', { text: 'Shared history: channel digests are retained by the relay, so a new device sees the conversation.' }),
-        el('li', { text: 'Server cards: joining by invite brings the real name, icon, categories and member roles.' }),
-        el('li', { text: 'Plans: Free, Plus and Studio with bigger uploads, more servers and a badge.' }),
-        el('li', { text: 'Cloud copies now trim themselves to fit instead of failing, and note what was left out.' }))),
+        el('li', { text: 'Plans: Free, Plus and Studio with bigger uploads, more servers and a badge.' }))),
     el('div', { class: 'setting-block' },
       el('div', { class: 'kv-list' },
         el('div', {}, el('span', { text: 'Version' }), el('b', { text: CONFIG.version })),

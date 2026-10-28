@@ -622,6 +622,18 @@ export const net = {
     return this.sendSystemRetained(`log/${key}/${channel}`, body);
   },
 
+  /** Send a server card to one person only (used by invite-only servers). */
+  sendServerCard({ to, card }) {
+    if (!to || !card?.key) return 0;
+    return this.publish({ kind: 'server-card', to, card });
+  },
+
+  /** Tell the room that an invite-only server moved to a new key. */
+  sendRekey({ oldKey, nextKey, serverId }) {
+    if (!oldKey || !nextKey) return 0;
+    return this.publish({ kind: 'rekey', oldKey, nextKey, serverId }, { noDedupe: true });
+  },
+
   /** Publish what a server looks like, so members see its real name and icon. */
   publishServerCard(card) {
     if (!card?.key) return 0;

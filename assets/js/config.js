@@ -41,11 +41,12 @@ function parseCandidates() {
 }
 
 const joinKey = params.get('join') || params.get('server') || '';
+const inviteKey = params.get('invite') || '';
 const joinName = params.get('name') || '';
 
 export const CONFIG = {
   appName: 'TalkingApp',
-  version: '2.0.0',
+  version: '2.1.0',
   room: (params.get('room') || localStorage.getItem('ta.room') || 'talkingapp-public-v1').replace(/[^a-z0-9-]/gi, '').slice(0, 40) || 'talkingapp-public-v1',
   relay: {
     candidates: parseCandidates(),
@@ -58,8 +59,14 @@ export const CONFIG = {
     issues: 'https://github.com/jaydenwhite7714/TalkingAPP/issues',
   },
   isLocal,
-  invite: joinKey
-    ? { key: joinKey.replace(/[^a-z0-9-]/gi, '').slice(0, 40), name: (joinName || joinKey).slice(0, 40) }
+  // `?join=` is a public server, `?invite=` is an invite-only one — both carry
+  // the server's key, but the invite form is the only way into a private room.
+  invite: (joinKey || inviteKey)
+    ? {
+      key: String(joinKey || inviteKey).replace(/[^a-z0-9_-]/gi, '').slice(0, 48),
+      name: (joinName || joinKey || inviteKey).slice(0, 40),
+      private: Boolean(inviteKey),
+    }
     : null,
 };
 

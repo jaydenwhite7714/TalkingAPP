@@ -3,7 +3,7 @@ import { el, autoResizeTextarea, debounce, throttle, escapeHtml, nearBottom } fr
 import { icon, iconHTML } from '../icons.js';
 import {
   state, activeChannel, sendMessage, editMessage, toast, setSetting,
-  canPostInChannel, currentPlan,
+  canPostInChannel, currentPlan, dmPeer, isBlocked, unblockUser,
 } from '../store.js';
 import { maxUploadBytes, planOf } from '../plans.js';
 import { bus } from '../bus.js';
@@ -100,6 +100,24 @@ function render() {
   const typingBar = el('div', { class: 'typing-bar', id: 'typingBar', style: { visibility: 'hidden' } });
   area.append(typingBar);
   updateTypingBar();
+
+  const peer = ch.type === 'dm' ? dmPeer(ch.id) : null;
+  if (peer && isBlocked(peer.id)) {
+    area.append(el('div', { class: 'composer-locked' },
+      el('span', { class: 'cl-ico', html: iconHTML('lock', 16) }),
+      el('div', { style: { flex: '1' } },
+        el('b', { text: `You blocked ${peer.displayName || 'this person'}` }),
+        el('span', { text: 'They cannot reach you and their messages stay hidden. Nothing was deleted.' })),
+      el('button', {
+        class: 'btn btn-secondary btn-sm', type: 'button',
+        onclick: () => {
+          unblockUser(peer.id);
+          toast(`Unblocked ${peer.displayName || 'them'}`, 'ok');
+          render();
+        },
+      }, icon('check', 14), 'Unblock')));
+    return;
+  }
 
   if (!canPostInChannel(ch.id)) {
     const server = ch.serverId ? state.servers[ch.serverId] : null;

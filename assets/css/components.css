@@ -873,3 +873,37 @@ kbd.key {
 }
 .composer-locked b { display: block; font-size: 13.5px; font-weight: 700; color: var(--text); }
 .composer-locked span { display: block; margin-top: 2px; font-size: 12.3px; line-height: 1.5; color: var(--text-3); }
+
+/* --- blocked people ------------------------------------------------------ */
+.blocked-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 16px;
+  padding: 8px 11px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-3);
+  background: color-mix(in oklab, var(--bg-elevated-2) 80%, transparent);
+  border: 1px dashed var(--border);
+}
+.blocked-notice svg { flex: none; opacity: .8; }
+.blocked-notice .link-btn { margin-left: auto; white-space: nowrap; }
+
+.blocked-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 5px;
+  padding: 0 5px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #c7cbd6;
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid rgba(255, 255, 255, .12);
+}
+.dm-item.is-blocked .dm-preview { font-style: italic; }

@@ -8,7 +8,8 @@ import { renderContent, plainPreview } from '../markdown.js';
 import { emojify } from '../emojis.js';
 import {
   state, toggleReaction, togglePin, deleteMessage, findMessage, markRead, toast,
-  canModerateChannel, roleOf,
+  canModerateChannel, roleOf, visibleMessages, isHiddenMessage, blockedList,
+  isBlocked, toggleBlockUser,
 } from '../store.js';
 import { roleChipHTML } from '../perms.js';
 import { planBadgeHTML, planForUser } from '../plans.js';
@@ -41,6 +42,7 @@ export function initMessages() {
 
   bus.on('message:new', ({ channelId, message }) => {
     if (channelId !== ctx.channelId) return;
+    if (isHiddenMessage(message)) return;
     if (!message.system && !message.isSelf) markRead(channelId);
     handleIncoming(message);
   });
@@ -68,6 +70,9 @@ export function initMessages() {
     }
   });
   bus.on('typing:changed', renderTyping);
+  bus.on('messages:filtered', () => {
+    if (ctx.channelId && state.channels[ctx.channelId]) openChannelView(ctx.channelId);
+  });
 }
 
 /* ------------------------------ full render ------------------------------ */
@@ -87,7 +92,11 @@ export function openChannelView(channelId) {
 
   inner.append(introNode(ch));
 
-  const list = state.messages[channelId] || [];
+  // People you blocked never show up here — the messages stay saved, so
+  // unblocking brings them straight back.
+  const list = visibleMessages(channelId);
+  const hidden = (state.messages[channelId] || []).length - list.length;
+  if (hidden > 0) inner.append(blockedNotice(hidden));
   const hasUnread = list.some((m) => m.ts > readTs && !m.isSelf && !m.system);
   let unreadInserted = !hasUnread;
 
@@ -119,6 +128,18 @@ export function openChannelView(channelId) {
     unread.scrollIntoView({ block: 'center' });
     atBottom = false;
   }
+}
+
+function blockedNotice(count) {
+  const bar = el('div', { class: 'blocked-notice' },
+    icon('lock', 14),
+    el('span', { text: `${count} message${count === 1 ? '' : 's'} hidden because you blocked ${blockedList().length === 1 ? 'someone' : 'people'} here.` }),
+    el('button', {
+      class: 'link-btn', type: 'button',
+      onclick: () => import('./modals.js').then((m) => m.openSettings('blocked')),
+    }, 'Manage blocked users'),
+  );
+  return bar;
 }
 
 function noChannelState() {
@@ -415,6 +436,20 @@ export function messageMenu(msg, anchor) {
       const u = state.users[msg.userId] || { id: msg.userId, displayName: msg.displayName, handle: msg.handle, avatar: msg.avatar };
       openProfileCard({ anchor, user: u, status: state.presence[msg.userId], onMessage: (usr) => openDM(usr.id, usr) });
     } });
+    const authorBlocked = isBlocked(msg.userId);
+    items.push({
+      label: authorBlocked ? 'Unblock this person' : 'Block this person',
+      icon: authorBlocked ? 'check' : 'ban',
+      onClick: () => {
+        const res = toggleBlockUser(msg.userId, {
+          displayName: msg.displayName, handle: msg.handle,
+        });
+        if (!res?.ok) { toast(res?.error || 'Could not do that', 'error'); return; }
+        toast(authorBlocked
+          ? `Unblocked ${msg.displayName}`
+          : `Blocked ${msg.displayName} — their messages are hidden`, 'ok', { duration: 3200 });
+      },
+    });
     if (canModerate) {
       items.push({ label: 'Delete as moderator', icon: 'trash', danger: true, onClick: async () => {
         const ok = await confirmDialog({
