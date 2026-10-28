@@ -713,3 +713,163 @@ kbd.key {
 }
 .tip-card b { font-size: 13px; font-weight: 650; display: block; }
 .tip-card p { font-size: 12.3px; color: var(--text-3); line-height: 1.45; margin-top: 1px; }
+
+/* ==========================================================================
+   Roles, plans and read-only states
+   ========================================================================== */
+
+/* --- role chips ---------------------------------------------------------- */
+.role-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  line-height: 1;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--role-color, #8b95a5) 70%, #fff);
+  background: color-mix(in oklab, var(--role-color, #8b95a5) 18%, transparent);
+  border: 1px solid color-mix(in oklab, var(--role-color, #8b95a5) 38%, transparent);
+  vertical-align: middle;
+}
+.role-chip[data-role="owner"] { color: #ffd479; }
+.member .m-sub .role-chip { margin-left: 5px; height: 13px; }
+
+/* --- plan badges --------------------------------------------------------- */
+.plan-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  line-height: 1;
+  color: color-mix(in oklab, var(--plan-color, #8b6ff5) 55%, #fff);
+  background: color-mix(in oklab, var(--plan-color, #8b6ff5) 20%, transparent);
+  border: 1px solid color-mix(in oklab, var(--plan-color, #8b6ff5) 42%, transparent);
+  vertical-align: middle;
+}
+.plan-badge.is-small { height: 13px; font-size: 8.5px; padding: 0 4px; }
+
+/* --- plan picker --------------------------------------------------------- */
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  transition: border-color var(--dur-2), transform var(--dur-2);
+}
+.plan-card:hover { border-color: color-mix(in oklab, var(--plan-color, var(--accent)) 45%, var(--border)); }
+.plan-card.is-current {
+  border-color: color-mix(in oklab, var(--plan-color, var(--accent)) 60%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--plan-color, var(--accent)) 26%, transparent);
+}
+.plan-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.plan-head b { font-size: 15px; font-weight: 750; color: var(--text); }
+.plan-price { display: block; margin-top: 2px; font-size: 12px; color: var(--text-3); }
+.plan-price b { font-size: 17px; color: var(--text); }
+.plan-current {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: color-mix(in oklab, var(--plan-color, var(--accent)) 65%, #fff);
+  background: color-mix(in oklab, var(--plan-color, var(--accent)) 16%, transparent);
+  padding: 3px 7px;
+  border-radius: var(--radius-full);
+}
+.plan-tagline { font-size: 12.5px; line-height: 1.45; color: var(--text-3); }
+.plan-perks { display: flex; flex-direction: column; gap: 5px; margin: 2px 0 4px; }
+.plan-perks li {
+  position: relative;
+  padding-left: 17px;
+  font-size: 12.3px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+.plan-perks li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 5px;
+  width: 8px;
+  height: 5px;
+  border-left: 2px solid var(--green-bright, #3ba55d);
+  border-bottom: 2px solid var(--green-bright, #3ba55d);
+  transform: rotate(-45deg);
+}
+.plan-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.plan-limit { font-size: 11px; color: var(--text-4); }
+
+/* --- member administration ---------------------------------------------- */
+.member-admin { display: flex; flex-direction: column; gap: 2px; }
+.member-admin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+}
+.member-admin-row:hover { background: var(--bg-hover); }
+.ma-avatar { display: inline-flex; flex: none; }
+.ma-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.ma-name b { font-size: 13px; font-weight: 650; color: var(--text); line-height: 1.25; }
+.ma-name span { font-size: 11.5px; color: var(--text-3); }
+.ma-role { flex: none; }
+.input-select.input-sm {
+  width: auto;
+  min-width: 104px;
+  height: 28px;
+  padding: 0 26px 0 9px;
+  font-size: 12px;
+}
+
+/* --- read-only composer -------------------------------------------------- */
+.composer-locked {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 16px 14px;
+  padding: 13px 14px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklab, var(--yellow, #f0b232) 9%, var(--bg-elevated));
+  border: 1px solid color-mix(in oklab, var(--yellow, #f0b232) 26%, var(--border));
+}
+.composer-locked .cl-ico {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--yellow, #f0b232);
+  background: color-mix(in oklab, var(--yellow, #f0b232) 16%, transparent);
+}
+.composer-locked b { display: block; font-size: 13.5px; font-weight: 700; color: var(--text); }
+.composer-locked span { display: block; margin-top: 2px; font-size: 12.3px; line-height: 1.5; color: var(--text-3); }

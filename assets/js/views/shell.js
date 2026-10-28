@@ -5,7 +5,10 @@ import { avatarHTML, serverIconHTML, defaultAvatar } from '../avatar.js';
 import {
   state, selectServer, selectChannel, dmList, unreadCount, mentionCount, markRead,
   pinnedMessages, openDM, toast, setSetting, firstServerId, canManageServer,
+  memberList, roleOf, setServerNotify, canModerateChannel,
 } from '../store.js';
+import { roleChipHTML, roleRecord } from '../perms.js';
+import { planBadgeHTML, planForUser } from '../plans.js';
 import { bus } from '../bus.js';
 import { openMenu, closeMenu } from '../ui/menu.js';
 import { openProfileCard } from '../ui/profileCard.js';
@@ -157,9 +160,18 @@ function toggleTheme() {
 
 function serverMenu(s, e) {
   const owner = canManageServer(s);
+  const notifyLabel = { all: 'All messages', mentions: 'Only @mentions', none: 'Nothing' };
+  const setNotify = (level) => {
+    setServerNotify(s.id, level);
+    toast(`${s.name}: ${notifyLabel[level]}`, 'ok', { duration: 1800 });
+  };
   const items = [
     { label: 'Mark as read', icon: 'check', onClick: () => { s.channelIds.forEach(markRead); renderSidebar(); renderRail(); } },
     { label: 'Invite people', icon: 'userPlus', onClick: () => modals.openInvite(s) },
+    { type: 'label', label: `Notifications — ${notifyLabel[s.notify || 'all']}` },
+    { label: 'All messages', icon: (s.notify || 'all') === 'all' ? 'check' : 'bell', onClick: () => setNotify('all') },
+    { label: 'Only @mentions', icon: s.notify === 'mentions' ? 'check' : 'at', onClick: () => setNotify('mentions') },
+    { label: 'Nothing', icon: s.notify === 'none' ? 'check' : 'bellOff', onClick: () => setNotify('none') },
   ];
   if (owner) {
     items.push({ label: 'Create channel', icon: 'hash', onClick: () => modals.openCreateChannel(s) });
@@ -237,72 +249,96 @@ function renderSidebar() {
       }, icon('info', 18)));
     }
 
-    const group = el('div', { class: `channel-group${collapsedGroups.has('text_' + s.id) ? ' collapsed' : ''}` });
-    const head = el('div', { class: 'channel-group-head' },
-      el('button', {
-        class: 'group-toggle', type: 'button',
-        onclick: () => {
-          const key = 'text_' + s.id;
-          if (collapsedGroups.has(key)) collapsedGroups.delete(key); else collapsedGroups.add(key);
-          renderSidebar();
-        },
-      }, icon('chevronDown', 12), el('span', { text: 'Text channels' })),
-      canManageServer(s) ? el('button', {
-        class: 'channel-group-add', type: 'button', 'aria-label': 'Create channel', title: 'Create channel',
-        onclick: (e) => { e.stopPropagation(); modals.openCreateChannel(s); },
-      }, icon('plus', 14)) : null,
-    );
-    group.append(head);
-    const list = el('div', { class: 'channel-list' });
+    // channels, grouped by category when the owner has set any
+    const buckets = new Map();
     for (const cid of s.channelIds) {
       const ch = state.channels[cid];
       if (!ch) continue;
-      const unread = unreadCount(cid);
-      const mentions = mentionCount(cid);
-      const active = state.ui.activeChannelId === cid;
-      const item = el('a', {
-        class: `channel-item${active ? ' is-active' : ''}${unread ? ' unread' : ''}`,
-        'data-channel': cid,
-        tabindex: '0',
-        role: 'link',
-        onclick: (e) => { e.preventDefault(); goToChannel(cid); },
-        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goToChannel(cid); } },
-      },
-        icon('hash', 18),
-        el('span', { class: 'ch-name', text: ch.name }),
-      );
-      if (unread) item.append(el('span', { class: 'badge', text: String(mentions || unread) }));
-      const actions = el('span', { class: 'channel-actions' });
-      const gear = el('button', {
-        type: 'button', 'aria-label': 'Channel options', title: 'Edit channel',
-        onclick: (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const owner = canManageServer(s);
-          openMenu({
-            items: [
-              owner ? { label: 'Edit channel', icon: 'edit', onClick: () => modals.openCreateChannel(s, ch) } : null,
-              { label: 'Copy channel name', icon: 'copy', onClick: async () => {
-                const { copyToClipboard } = await import('../util.js');
-                await copyToClipboard(`#${ch.name}`);
-                toast('Copied', 'ok');
-              } },
-              { label: 'Mark as read', icon: 'check', onClick: () => { markRead(cid); renderSidebar(); } },
-              { label: 'Mute notifications', icon: 'bell', onClick: () => { toast('Channel muted', 'ok'); } },
-              owner ? { sep: true } : null,
-              owner ? { label: 'Delete channel', icon: 'trash', danger: true, onClick: () => modals.deleteChannelFlow(ch) } : null,
-            ].filter(Boolean),
-            at: e,
-            align: 'end',
-          });
-        },
-      }, icon('settings', 14));
-      actions.append(gear);
-      item.append(actions);
-      list.append(item);
+      const key = (ch.category || '').trim();
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(cid);
     }
-    group.append(list);
-    scroll.append(group);
+    if (buckets.size > 1 || !buckets.has('')) buckets.set('', buckets.get('') || []);
+
+    for (const [category, channelIds] of buckets) {
+      if (!channelIds.length && category) continue;
+      const groupKey = `cat_${s.id}_${category || ''}`;
+      const group = el('div', { class: `channel-group${collapsedGroups.has(groupKey) ? ' collapsed' : ''}` });
+      const head = el('div', { class: 'channel-group-head' },
+        el('button', {
+          class: 'group-toggle', type: 'button',
+          onclick: () => {
+            if (collapsedGroups.has(groupKey)) collapsedGroups.delete(groupKey); else collapsedGroups.add(groupKey);
+            renderSidebar();
+          },
+        }, icon('chevronDown', 12), el('span', { text: category || 'Text channels' })),
+        canManageServer(s) ? el('button', {
+          class: 'channel-group-add', type: 'button', 'aria-label': 'Create channel', title: category ? `Create a channel in ${category}` : 'Create channel',
+          onclick: (e) => { e.stopPropagation(); modals.openCreateChannel(s, null, { category }); },
+        }, icon('plus', 14)) : null,
+      );
+      group.append(head);
+      const list = el('div', { class: 'channel-list' });
+      for (const cid of channelIds) {
+        const ch = state.channels[cid];
+        if (!ch) continue;
+        const unread = unreadCount(cid);
+        const mentions = mentionCount(cid);
+        const active = state.ui.activeChannelId === cid;
+        const item = el('a', {
+          class: `channel-item${active ? ' is-active' : ''}${unread ? ' unread' : ''}`,
+          'data-channel': cid,
+          tabindex: '0',
+          role: 'link',
+          title: ch.topic || `#${ch.name}`,
+          onclick: (e) => { e.preventDefault(); goToChannel(cid); },
+          onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goToChannel(cid); } },
+        },
+          icon(ch.type === 'announcement' ? 'bell' : 'hash', 18),
+          el('span', { class: 'ch-name', text: ch.name }),
+        );
+        if (unread) item.append(el('span', { class: 'badge', text: String(mentions || unread) }));
+        const actions = el('span', { class: 'channel-actions' });
+        const gear = el('button', {
+          type: 'button', 'aria-label': 'Channel options', title: 'Edit channel',
+          onclick: (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const owner = canManageServer(s);
+            openMenu({
+              items: [
+                owner ? { label: 'Edit channel', icon: 'edit', onClick: () => modals.openCreateChannel(s, ch) } : null,
+                { label: 'Copy channel name', icon: 'copy', onClick: async () => {
+                  const { copyToClipboard } = await import('../util.js');
+                  await copyToClipboard(`#${ch.name}`);
+                  toast('Copied', 'ok');
+                } },
+                { label: 'Mark as read', icon: 'check', onClick: () => { markRead(cid); renderSidebar(); } },
+                {
+                label: s.notify === 'none' ? 'Unmute this server' : 'Mute this server',
+                icon: s.notify === 'none' ? 'bell' : 'bellOff',
+                onClick: () => {
+                  const next = s.notify === 'none' ? 'all' : 'none';
+                  setServerNotify(s.id, next);
+                  toast(next === 'none' ? `${s.name} muted` : `${s.name} unmuted`, 'ok', { duration: 1800 });
+                  renderSidebar();
+                },
+              },
+                owner ? { sep: true } : null,
+                owner ? { label: 'Delete channel', icon: 'trash', danger: true, onClick: () => modals.deleteChannelFlow(ch) } : null,
+              ].filter(Boolean),
+              at: e,
+              align: 'end',
+            });
+          },
+        }, icon('settings', 14));
+        actions.append(gear);
+        item.append(actions);
+        list.append(item);
+      }
+      group.append(list);
+      scroll.append(group);
+    }
     scroll.append(networkCard(s));
   }
   renderUserPanel();
@@ -579,18 +615,34 @@ function renderMembers() {
     membersEl.append(el('div', { class: 'members-group-head', style: { marginTop: '10px' }, text: `Offline — ${offline.length}` }));
     for (const m of offline) membersEl.append(memberRow(m, s));
   }
+
+  // people with a role who are not online right now still belong in the list
+  const tracked = memberList(s).filter((m) => m.id !== self?.id && !seen.has(m.id));
+  if (tracked.length) {
+    membersEl.append(el('div', { class: 'members-group-head', style: { marginTop: '10px' }, text: `Members — ${tracked.length}` }));
+    for (const m of tracked) {
+      membersEl.append(memberRow({
+        user: { id: m.id, displayName: m.name, handle: m.handle, plan: m.plan, avatar: defaultAvatar(m.name), accentColor: null },
+        status: 'offline',
+        member: m,
+      }, s));
+    }
+  }
 }
 
 function simulatedMembers(key) {
   return Object.values(state.users).filter((u) => u.simulated && (u.communities || []).includes(key));
 }
 
-function memberRow({ user, status, self, simulated }, server) {
+function memberRow({ user, status, self, simulated, member }, server) {
   const row = el('div', { class: `member${status === 'offline' ? ' offline' : ''}`, role: 'button', tabindex: '0' });
+  const roleId = roleOf(server, user.id);
+  const isOwner = server.ownerId === user.id || roleId === 'owner';
+  const plan = planForUser(user);
   row.innerHTML = `${avatarHTML(user, { size: 30, status, showStatus: true })}
     <div class="m-meta">
-      <div class="m-name">${escapeHtml(user.displayName)}${self && server.ownerId === user.id ? '<span class="m-crown">' + iconHTML('crown', 13) + '</span>' : ''}</div>
-      <div class="m-sub">${simulated ? 'demo member' : '@' + escapeHtml(user.handle)}</div>
+      <div class="m-name">${escapeHtml(user.displayName)}${isOwner ? '<span class="m-crown">' + iconHTML('crown', 13) + '</span>' : ''}${planBadgeHTML(plan, { small: true })}</div>
+      <div class="m-sub">${simulated ? 'demo member' : '@' + escapeHtml(user.handle)}${roleId !== 'member' ? roleChipHTML(isOwner ? 'owner' : roleId) : ''}</div>
     </div>`;
   row.addEventListener('click', (e) => {
     openProfileCard({ anchor: row, user, status, simulated, placement: 'left', onMessage: (u) => openDM(u.id, u) });

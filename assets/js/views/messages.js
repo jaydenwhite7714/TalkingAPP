@@ -8,7 +8,10 @@ import { renderContent, plainPreview } from '../markdown.js';
 import { emojify } from '../emojis.js';
 import {
   state, toggleReaction, togglePin, deleteMessage, findMessage, markRead, toast,
+  canModerateChannel, roleOf,
 } from '../store.js';
+import { roleChipHTML } from '../perms.js';
+import { planBadgeHTML, planForUser } from '../plans.js';
 import { bus } from '../bus.js';
 import { openMenu, closePopover } from '../ui/menu.js';
 import { openProfileCard } from '../ui/profileCard.js';
@@ -199,6 +202,25 @@ function messageNode(msg, { group = true } = {}) {
     const head = el('div', { class: 'msg-head' },
       el('span', { class: 'msg-author', 'data-user': msg.userId, text: msg.displayName }),
     );
+    const server = msg.channelId && state.channels[msg.channelId]?.serverId
+      ? state.servers[state.channels[msg.channelId].serverId]
+      : null;
+    if (server && !msg.system) {
+      const roleId = roleOf(server, msg.userId);
+      if (roleId !== 'member') {
+        const chip = document.createElement('span');
+        chip.innerHTML = roleChipHTML(roleId);
+        if (chip.firstElementChild) head.append(chip.firstElementChild);
+      }
+    }
+    if (!msg.system) {
+      const badgeHTML = planBadgeHTML(planForUser(state.users[msg.userId] || { plan: msg.plan }));
+      if (badgeHTML) {
+        const wrapper = document.createElement('span');
+        wrapper.innerHTML = badgeHTML;
+        if (wrapper.firstElementChild) head.append(wrapper.firstElementChild);
+      }
+    }
     if (msg.system) head.append(el('span', { class: 'msg-badge bot', text: 'APP' }));
     if (isSelf) head.append(el('span', { class: 'msg-badge', text: 'YOU', style: 'background:var(--bg-hover-strong);color:var(--text-2)' }));
     if (msg.isSimulated) head.append(el('span', { class: 'msg-badge net', text: 'DEMO' }));
@@ -360,25 +382,26 @@ function toolbar(msg) {
 
 export function messageMenu(msg, anchor) {
   const isSelf = msg.userId === state.self?.id;
+  const canModerate = canModerateChannel(msg.channelId) && !isSelf;
   const items = [
     { label: 'Add reaction', icon: 'smile', onClick: () => openEmojiPicker({ anchor, onPick: (e) => toggleReaction(msg.channelId, msg.id, e) }) },
     { label: 'Reply', icon: 'reply', onClick: () => import('./composer.js').then((m) => m.setReplyTo(msg)) },
     { label: 'Copy text', icon: 'copy', onClick: async () => { await copyToClipboard(msg.text); toast('Message copied', 'ok'); } },
     { sep: true },
-    {
+    (isSelf || canModerate) ? {
       label: msg.pinned ? 'Unpin message' : 'Pin message',
       icon: 'pin',
       onClick: () => {
         const pinned = togglePin(msg.channelId, msg.id);
         toast(pinned ? 'Pinned to this channel' : 'Unpinned', 'ok');
       },
-    },
+    } : null,
     { label: 'Copy message link', icon: 'link', onClick: async () => {
       const url = `${location.origin}${location.pathname}#/channel/${msg.channelId}/${msg.id}`;
       await copyToClipboard(url);
       toast('Link copied', 'ok');
     } },
-  ];
+  ].filter(Boolean);
   if (isSelf) {
     items.push({ sep: true });
     items.push({ label: 'Edit message', icon: 'edit', onClick: () => import('./composer.js').then((m) => m.startEdit(msg)) });
@@ -392,6 +415,17 @@ export function messageMenu(msg, anchor) {
       const u = state.users[msg.userId] || { id: msg.userId, displayName: msg.displayName, handle: msg.handle, avatar: msg.avatar };
       openProfileCard({ anchor, user: u, status: state.presence[msg.userId], onMessage: (usr) => openDM(usr.id, usr) });
     } });
+    if (canModerate) {
+      items.push({ label: 'Delete as moderator', icon: 'trash', danger: true, onClick: async () => {
+        const ok = await confirmDialog({
+          title: 'Delete this message?',
+          body: `${msg.displayName} will lose this message for everyone in the channel. Moderators can do this.`,
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (ok) { deleteMessage(msg.channelId, msg.id); toast('Message removed', 'ok'); }
+      } });
+    }
   }
   openMenu({ items, at: anchor, align: 'end' });
 }

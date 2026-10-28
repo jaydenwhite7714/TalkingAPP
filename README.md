@@ -1,8 +1,8 @@
 # TalkingApp
 
 A Discord-style chat app that runs entirely in your browser and deploys free on **GitHub Pages**.
-Pick a username, create a server, make channels, and talk to everyone on the site in real time —
-no accounts, no backend to run, no installs.
+Pick a username and password, create servers with roles and channels, send pictures and GIFs, and
+talk to everyone on the site in real time — no backend to run, no installs.
 
 **[Open TalkingApp »](https://jaydenwhite7714.github.io/TalkingAPP/)**
 
@@ -18,14 +18,33 @@ Messages, reactions, edits, deletes, typing indicators and presence all arrive i
 everyone else's screen. Offline? Messages are queued locally and sent the moment the network
 comes back.
 
-**Your identity, no sign-up.** Pick a display name, `@username`, avatar (upload or generated
-colour) and bio. It's saved in your browser — no email, no password, nothing to verify.
+**A real account.** Pick a display name, `@username` and password. The password is verified with
+PBKDF2-SHA256 (150k rounds, per-account salt) and the app asks for it every time it opens; the
+session copy lives in memory only. Usernames cannot be reused, and one account per browser.
+
+**Everything follows you.** Servers, channels, messages, DMs, settings, roles and your plan are
+sealed with AES-GCM into a cloud copy keyed by your username. Sign in on another Chromebook and the
+copy is fetched, decrypted and restored — the relay keeps the retained frames, so it works with
+nobody else online. Copies trim themselves to fit instead of silently failing, and the newest
+messages and pictures are the last things dropped. A plain JSON backup file is one click away too.
+
+**Roles that actually stop people.** Owner, admin, moderator, member and read-only. Capabilities are
+checked in the store before any mutation, in the UI, and again when a change arrives from the
+network: only the author or the server owner can rewrite or delete a message remotely. Servers you
+did not create are read-only for you, announcement channels are staff-only, and a server card
+published by someone else can never rename a server you own.
 
 **Servers, channels, communities.**
-- Create servers with an icon, colour and description, and as many text channels as you like.
-- Public servers are listed in **Explore** where anyone online can join with one click.
-- Join a server and you receive its recent history automatically.
-- Share an invite link that drops people straight into your server (`?join=your-server`).
+- Create servers with an icon, colour, description and categories of channels; per-server
+  notification levels (all / mentions / muted).
+- Public servers are listed in **Explore** where anyone online can join with one click — with the
+  real name, icon, owner and channel list, not a blank mirror.
+- **Shared history:** each channel publishes a compact text-only digest as a retained relay frame,
+  so a device that opens the page later still sees the conversation, even if nobody is online.
+- Share an invite link that drops people into your server (`?join=your-server`), complete with its
+  channels and categories.
+- Give people roles in **Server settings → People & roles**; the member list shows role chips and
+  plan badges.
 
 **A chat client that feels finished.**
 Markdown (`**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `` `code` ``, code blocks,
@@ -33,6 +52,11 @@ Markdown (`**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `` `code` ``, c
 replies, reactions, pinned messages, message editing and deleting, image attachments, mentions
 with autocomplete, channel links, message search, direct messages, a member list with live
 presence, unread badges, notification sounds, desktop notifications, and a keyboard-shortcut layer.
+
+**Plans, without a payment screen.** Free, Plus and Studio change how many servers you can create,
+how many channels each gets, your upload ceiling, how much history travels in the shared log and how
+big the encrypted cloud copy is. Paid tiers add a badge next to your name. Switching is instant,
+nothing is charged, and the plan travels with your account. See **Settings → Plans**.
 
 **Three themes, eight accents, compact mode.** Dark, light and midnight, all instant.
 
@@ -91,6 +115,11 @@ browser C ─┘                        ├─ MQTT: test.mosquitto.org  (spare)
 * Presence is a heartbeat every few seconds; peers expire after 50 s of silence.
 * Joining a community sends a `sync` request and whoever is already inside replays the last
   20 messages per channel (`history`).
+* Every channel also publishes its recent messages as a **retained** frame on
+  `log/<server-key>/<channel>`, and each server publishes a card on `srv/<server-key>`. Retained
+  frames are replayed by the relay (and by public MQTT brokers) to any client that connects later,
+  which is what makes history and server branding survive a fresh device. Digests are text-only and
+  capped at ~96 KB; deletions travel as tombstones.
 * If no transport is connected, outgoing messages are parked in an outbox and flushed
   automatically on reconnect. The UI shows “Waiting for the network”.
 
@@ -113,8 +142,9 @@ A private room: `?room=my-private-room`.
 
 * Messages travel through **public** relay servers, unencrypted. Anyone with the topic name
   could subscribe. Treat the room like a public square — great for hanging out, not for secrets.
-* Nothing is stored on a server. Your profile, servers, channels and message history live in
-  `localStorage` in your own browser.
+* Your profile, servers, channels and message history live in `localStorage` in your own browser.
+  The only thing replicated is your **encrypted** cloud copy, plus the text-only channel digests and
+  server cards described above — never images, never passwords.
 * Images are downscaled and embedded in the message (no uploads, no hosting).
 * **Settings → Reset data** wipes everything on your device.
 
@@ -130,7 +160,13 @@ assets/css/                tokens, layout, chat, components, onboarding, respons
 assets/js/
   main.js                  bootstrap, network wiring, notifications, routing, shortcuts
   store.js                 state, persistence, all mutations
-  net.js                   transport pool (MQTT / WebSocket / BroadcastChannel), outbox
+  net.js                   transport pool (MQTT / WebSocket / BroadcastChannel), outbox, digests
+  shared.js                retained history digests + server cards (cross-device sync)
+  perms.js                 roles and capabilities (pure, unit-tested)
+  plans.js                 Free / Plus / Studio definitions and limits
+  account.js               password hashing, handles, encrypted vault key
+  vault.js                 sealed cloud copy, trimming, file backups
+  session.js               in-memory session password
   markdown.js              safe message rendering
   emojis.js                emoji data, search, shortcodes
   avatar.js                avatars, image processing, server icons

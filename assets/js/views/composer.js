@@ -1,9 +1,11 @@
 // Message composer: typing, replies, editing, emoji, images, autocomplete
 import { el, autoResizeTextarea, debounce, throttle, escapeHtml, nearBottom } from '../util.js';
-import { icon } from '../icons.js';
+import { icon, iconHTML } from '../icons.js';
 import {
   state, activeChannel, sendMessage, editMessage, toast, setSetting,
+  canPostInChannel, currentPlan,
 } from '../store.js';
+import { maxUploadBytes, planOf } from '../plans.js';
 import { bus } from '../bus.js';
 import { openEmojiPicker } from '../ui/emojiPicker.js';
 import { closePopover } from '../ui/menu.js';
@@ -98,6 +100,19 @@ function render() {
   const typingBar = el('div', { class: 'typing-bar', id: 'typingBar', style: { visibility: 'hidden' } });
   area.append(typingBar);
   updateTypingBar();
+
+  if (!canPostInChannel(ch.id)) {
+    const server = ch.serverId ? state.servers[ch.serverId] : null;
+    const role = server?.members?.[state.self?.id]?.role;
+    area.append(el('div', { class: 'composer-locked' },
+      el('span', { class: 'cl-ico', html: iconHTML('lock', 16) }),
+      el('div', {},
+        el('b', { text: ch.type === 'announcement' ? `#${ch.name} is an announcement channel` : `You have read-only access in ${server?.name || 'this server'}` }),
+        el('span', { text: ch.type === 'announcement'
+          ? 'Only moderators, admins and the owner can post here. You can still react and reply in the other channels.'
+          : `Your role is ${String(role || 'read-only').replace(/^./, (c) => c.toUpperCase())}. Ask the owner for a different role if you need to post.` }))));
+    return;
+  }
 
   if (state.ui.replyTo) {
     const msg = (state.messages[ch.id] || []).find((m) => m.id === state.ui.replyTo);
@@ -348,6 +363,13 @@ function pickImage() {
 
 async function attachImage(file) {
   try {
+    const plan = currentPlan();
+    const cap = maxUploadBytes(plan.id);
+    if (file.size > cap) {
+      const bigger = planOf(plan.id === 'free' ? 'plus' : 'studio');
+      toast(`${Math.round(file.size / (1024 * 1024))} MB is over the ${plan.limits.uploadMB} MB limit on ${plan.name}. ${bigger.name} allows ${bigger.limits.uploadMB} MB — Settings → Plans.`, 'warn', { duration: 6500 });
+      return;
+    }
     clearPreview();
     const composer = document.getElementById('composer');
     let preview = el('div', { class: 'composer-attachment', id: 'composerAttachment' },

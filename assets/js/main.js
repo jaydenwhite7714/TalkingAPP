@@ -5,7 +5,9 @@ import {
   registerAllCommunities, persistNow, unreadEverywhere, selectChannel, selectServer,
   activeChannel, openDM, ensureDMChannelForUser, applyRemoteReaction, findMessage, editMessage,
   deleteMessage, networkKeyFor, addMessage, setMessageAttachment,
+  touchMember, canModerateChannel, canPostInChannel, currentPlan,
 } from './store.js';
+import { initShared, flushPending, applyPendingForServer, cardFor, publishAllNow } from './shared.js';
 import { defaultAvatar, ensureWireAvatar } from './avatar.js';
 import { readAccount, writeAccount, readClaims, claimHandle, isClaimedLocally } from './account.js';
 import { showLock, startNetworkForLock, setUnlockHandler } from './views/lock.js';
@@ -79,6 +81,7 @@ async function boot() {
   document.getElementById('bootScreen')?.classList.add('hidden');
 
   wireAccountNetwork();
+  initShared();
   setUnlockHandler(() => enterFromLock());
 
   if (account) {
@@ -140,6 +143,12 @@ async function startApp() {
   if (state.settings.simulated) startSim();
 
   wireEvents();
+  // The lock screen connects before the app is listening, so anything it already
+  // heard (peers, presence) is replayed here — nobody is invisible on arrival.
+  for (const peer of net.peers.values()) applyPeer(peer);
+  flushPending();
+  // tell everyone what our public servers look like, and re-send our history
+  setTimeout(() => { if (net.status() === 'online') publishAllNow(); }, 1600);
   installShortcuts();
   handleInviteLink();
   updateTitle();
@@ -175,11 +184,17 @@ async function handleInviteLink() {
     return;
   }
   const { joinNetworkCommunity } = await import('./store.js');
-  const res = joinNetworkCommunity({ name: invite.name.replace(/-/g, ' '), key: invite.key, channels: ['general'] });
+  const res = joinNetworkCommunity({
+    name: invite.name.replace(/-/g, ' '),
+    key: invite.key,
+    channels: ['general'],
+    card: cardFor(invite.key),
+  });
   if (res.ok) {
+    const recovered = applyPendingForServer(invite.key);
     setTimeout(() => {
       goToServer(res.server.id);
-      toast(`You joined ${res.server.name}`, 'party', { duration: 3200 });
+      toast(`You joined ${res.server.name}${recovered ? ` — ${recovered} message${recovered === 1 ? '' : 's'} of history` : ''}`, 'party', { duration: 3200 });
       net.requestHistory({ serverKey: invite.key });
     }, 900);
   }
@@ -363,7 +378,7 @@ function wireEvents() {
   bus.on('net:chat', (p) => {
     const ch = resolveIncomingChannel(p);
     const from = p.from;
-    if (!state.users[from.id]) state.users[from.id] = from;
+    state.users[from.id] = { ...(state.users[from.id] || {}), ...from };
     if (!ch) {
       noteRemoteCommunity({ key: p.key, name: p.serverName, topic: p.serverTopic, channels: [p.channel], peerId: from.id });
       promptJoin(p);
@@ -394,6 +409,7 @@ function wireEvents() {
       setTimeout(() => { if (msg.attachmentPending) msg.attachmentPending = false; }, 12000);
     }
     receiveMessage({ channelId: ch.id, msg });
+    if (ch.serverId) touchMember(ch.serverId, from);
     notifyIncoming(ch, msg);
   });
 
@@ -545,18 +561,22 @@ function wireEvents() {
     if (p.to && p.to !== state.self?.id) return;
     const m = p.key === '@dm' ? findMessage(p.msgId) : (resolveIncomingChannel(p, { create: false }) ? findMessage(p.msgId, resolveIncomingChannel(p, { create: false }).id) : null);
     if (!m) return;
-    m.text = p.text;
-    m.editedTs = p.ts;
-    persistNow();
-    bus.emit('message:updated', { channelId: m.channelId, message: m });
+    // An edit is only honoured from the person who wrote the message, or from
+    // the owner of the server it lives in. Nobody else can rewrite history.
+    if (!mayRewrite(m, p)) return;
+    editMessage(m.channelId, m.id, p.text, { broadcast: false });
   });
 
   bus.on('net:delete', (p) => {
     if (p.to && p.to !== state.self?.id) return;
-    const m = p.key === '@dm' ? findMessage(p.msgId) : null;
-    const ch = m ? state.channels[m.channelId] : (p.key !== '@dm' ? resolveIncomingChannel(p, { create: false }) : null);
+    const ch = p.key === '@dm'
+      ? (() => { const m = findMessage(p.msgId); return m ? state.channels[m.channelId] : null; })()
+      : resolveIncomingChannel(p, { create: false });
     if (!ch) return;
-    deleteMessage(ch.id, p.msgId);
+    const m = findMessage(p.msgId, ch.id);
+    if (!m) return;
+    if (!mayRewrite(m, p)) return;
+    deleteMessage(ch.id, p.msgId, { broadcast: false });
   });
 
   bus.on('net:status', ({ status, transports, peers }) => {
@@ -575,6 +595,12 @@ function wireEvents() {
 
   bus.on('settings:changed', ({ key } = {}) => {
     applySettings();
+    // a plan change is part of who you are: let everyone see the new badge
+    if (key === 'plan' && state.self) {
+      state.self.plan = state.settings.plan;
+      net.updateProfile(state.self);
+      persistNow();
+    }
     if (key === 'desktopNotifs' && state.settings.desktopNotifs && 'Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission().catch(() => {});
     }
@@ -672,12 +698,26 @@ function applyPeer(peer) {
   for (const c of peer.communities || []) {
     if (typeof c === 'string') {
       noteRemoteCommunity({ key: c, name: c, channels: [], peerId: u.id });
+      const srv = Object.values(state.servers).find((x) => x.networkKey === c);
+      if (srv) touchMember(srv.id, u);
     } else if (c?.key) {
       noteRemoteCommunity({ key: c.key, name: c.name, topic: c.topic, channels: c.channels, peerId: u.id });
+      const srv = Object.values(state.servers).find((x) => x.networkKey === c.key);
+      if (srv) touchMember(srv.id, u);
     }
   }
   bus.emit('presence:changed');
   bus.emit('net:presence-applied');
+}
+
+/** Only the author or the server owner may edit or delete a message remotely. */
+function mayRewrite(message, packet) {
+  const fromId = packet?.from?.id;
+  if (!message || !fromId) return false;
+  if (message.userId === fromId) return true;
+  const ch = state.channels[message.channelId];
+  const server = ch?.serverId ? state.servers[ch.serverId] : null;
+  return Boolean(server?.ownerId && server.ownerId === fromId);
 }
 
 function expireTyping() {
@@ -728,9 +768,13 @@ function promptJoin(p) {
 
 function notifyIncoming(ch, msg) {
   if (!msg || msg.isSelf) return;
+  const server = ch.serverId ? state.servers[ch.serverId] : null;
+  const level = ch.type === 'dm' ? 'all' : (server?.notify || 'all');
   const isActive = ch.id === state.ui.activeChannelId && !document.hidden;
   const mentioned = new RegExp(`@${state.self?.handle}\\b`, 'i').test(msg.text || '') || /@everyone\b/i.test(msg.text || '');
-  if (!isActive && state.settings.sounds) playPop();
+  if (level === 'none') { updateTitle(); return; }
+  const wantsSound = level === 'all' || mentioned || ch.type === 'dm';
+  if (!isActive && state.settings.sounds && wantsSound) playPop();
   if (!isActive && mentioned) {
     const where = ch.type === 'dm' ? 'a direct message' : `#${ch.name}`;
     toast(`${msg.displayName} mentioned you in ${where}`, 'info', {
@@ -740,7 +784,8 @@ function notifyIncoming(ch, msg) {
   }
   if (document.hidden) {
     const label = ch.type === 'dm' ? msg.displayName : `#${ch.name} · ${msg.displayName}`;
-    if (mentioned || ch.type === 'dm' || state.settings.desktopNotifs) {
+    const wantsDesktop = level === 'all' ? (state.settings.desktopNotifs || mentioned) : mentioned;
+    if (mentioned || ch.type === 'dm' || wantsDesktop) {
       showNotification(label, msg.text.slice(0, 120) || 'New message');
       updateTitle(true);
     }

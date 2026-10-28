@@ -2,6 +2,8 @@
 import { bus } from './bus.js';
 import { storage, uid, randId, debounce, validateHandle, validateDisplayName, validateServerName, validateChannelName, colorFromString } from './util.js';
 import { defaultAvatar, AVATAR_COLORS } from './avatar.js';
+import { CAP, ROLES, can, canPostIn, roleIdFor, roleRecord, assignableRoles, isRoleId } from './perms.js';
+import { limitsFor, planOf, serverSlotsLeft, DEFAULT_PLAN, isPlanId } from './plans.js';
 
 export const STORAGE_KEY = 'ta.state.v2';
 export const PROFILE_KEY = 'ta.profile';
@@ -41,6 +43,7 @@ const DEFAULT_SETTINGS = {
   showTyping: true,
   simulated: false,
   onboardingSeen: false,
+  plan: 'free',
 };
 
 /* --------------------------------- state --------------------------------- */
@@ -147,6 +150,7 @@ export function load() {
   state.dmChannels = saved.dmChannels || {};
   state.blocked = saved.blocked || {};
   state.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
+  state.self.plan = isPlanId(state.settings.plan) ? state.settings.plan : DEFAULT_PLAN;
   state.users = saved.users || {};
   state.users[state.self.id] = state.self;
 
@@ -160,6 +164,10 @@ export function load() {
     }
     s.defaultChannelId = s.channelIds.includes(s.defaultChannelId) ? s.defaultChannelId : s.channelIds[0];
     s.networkKey = s.networkKey || networkKeyFor(s.name);
+    s.notify = ['all', 'mentions', 'none'].includes(s.notify) ? s.notify : 'all';
+    s.inviteCode = s.inviteCode || `inv_${randId(9)}`;
+    s.members = s.members && typeof s.members === 'object' ? s.members : {};
+    if (s.ownerId === state.self.id && s.members[state.self.id]) s.members[state.self.id].role = 'owner';
   }
   const savedServer = saved.ui?.activeServerId;
   state.ui.activeServerId = savedServer === '@me' ? '@me' : (state.servers[savedServer] ? savedServer : null);
@@ -192,6 +200,7 @@ function normalizeSelf(self) {
     accentColor: self.accentColor || AVATAR_COLORS[0],
     bio: self.bio || '',
     status: self.status || 'online',
+    plan: isPlanId(self.plan) ? self.plan : DEFAULT_PLAN,
     createdAt: self.createdAt || Date.now(),
     isSelf: true,
   };
@@ -230,6 +239,7 @@ export function createProfile({ displayName, handle, avatar, accentColor }) {
     accentColor: accentColor || AVATAR_COLORS[0],
     bio: '',
     status: 'online',
+    plan: DEFAULT_PLAN,
     createdAt: Date.now(),
     isSelf: true,
   };
@@ -280,7 +290,55 @@ export function wipeDevice() {
   location.reload();
 }
 
-/* ------------------------------- ownership ------------------------------- */
+/* -------------------------- membership & ownership ------------------------ */
+
+/** Everyone with a role in this server, including me. */
+export function ensureMember(server, user = state.self) {
+  if (!server || !user?.id) return null;
+  if (!server.members || typeof server.members !== 'object') server.members = {};
+  const existing = server.members[user.id];
+  if (existing) {
+    // keep names fresh so member lists never show yesterday's display name
+    existing.name = user.displayName || existing.name;
+    existing.handle = user.handle || existing.handle;
+    return existing;
+  }
+  const member = {
+    id: user.id,
+    name: user.displayName || 'Member',
+    handle: user.handle || 'member',
+    role: server.ownerId && server.ownerId === user.id ? 'owner' : 'member',
+    plan: user.plan || DEFAULT_PLAN,
+    since: Date.now(),
+  };
+  server.members[user.id] = member;
+  return member;
+}
+
+/** Note that somebody is a member (they spoke, or they showed up online). */
+export function touchMember(serverId, user) {
+  const server = state.servers[serverId];
+  if (!server || !user?.id || user.id === state.self?.id) return;
+  const made = !server.members?.[user.id];
+  const member = ensureMember(server, user);
+  if (member) member.plan = user.plan || member.plan || DEFAULT_PLAN;
+  if (made) {
+    persist();
+    bus.emit('members:changed', serverId);
+  }
+}
+
+export function memberList(server) {
+  if (!server?.members) return [];
+  return Object.values(server.members)
+    .map((m) => ({ ...m, role: roleIdFor(server, m.id) }))
+    .sort((a, b) => (ROLES[b.role]?.rank || 0) - (ROLES[a.role]?.rank || 0) || String(a.name).localeCompare(String(b.name)));
+}
+
+export function roleOf(serverId, userId = state.self?.id) {
+  const server = typeof serverId === 'string' ? state.servers[serverId] : serverId;
+  return roleIdFor(server, userId);
+}
 
 export function isServerOwner(server) {
   if (!server) return false;
@@ -288,17 +346,57 @@ export function isServerOwner(server) {
   return server.ownerId === state.self?.id;
 }
 
-/** Servers you created — or a starter server nobody owns — are editable. */
+/** Servers you can reshape: yours, or one where you were made an admin. */
 export function canManageServer(server, user = state.self) {
   if (!server || !user) return false;
-  if (server.ownerId) return server.ownerId === user.id;
-  return false;
+  return can(server, user.id, CAP.manageServer);
 }
 
 export function canManageChannel(channelId, user = state.self) {
   const ch = state.channels[channelId];
   if (!ch) return false;
+  if (ch.type === 'dm') return false;
   return canManageServer(state.servers[ch.serverId], user);
+}
+
+/** Can I delete or pin other people's messages here? */
+export function canModerateChannel(channelId, user = state.self) {
+  const ch = state.channels[channelId];
+  if (!ch) return false;
+  if (ch.type === 'dm') return false;
+  return can(state.servers[ch.serverId], user?.id, CAP.manageMessages);
+}
+
+/** Can I post in this channel? Announcements are staff-only, roles can be muted. */
+export function canPostInChannel(channelId, user = state.self) {
+  const ch = state.channels[channelId];
+  if (!ch) return false;
+  if (ch.type === 'dm') return true;
+  return canPostIn(state.servers[ch.serverId], ch, user?.id);
+}
+
+export function canAssignRolesIn(server) {
+  return assignableRoles(server, state.self?.id).length > 0;
+}
+
+/** Give somebody a role — owner can promote to admin, admins stop below themselves. */
+export function setMemberRole(serverId, userId, role) {
+  const server = state.servers[serverId];
+  if (!server) return { ok: false, error: 'Server not found.' };
+  if (!isRoleId(role) || role === 'owner') return { ok: false, error: 'That is not a role you can hand out.' };
+  if (!assignableRoles(server, state.self?.id).includes(role)) {
+    return { ok: false, error: `Only ${server.ownerId === state.self?.id ? 'you' : 'the owner'} can give out that role.` };
+  }
+  if (userId === server.ownerId) return { ok: false, error: 'The owner keeps the owner role.' };
+  const existing = server.members?.[userId];
+  const user = state.users[userId];
+  const member = existing || ensureMember(server, { id: userId, displayName: user?.displayName || 'Member', handle: user?.handle || 'member' });
+  if (!member) return { ok: false, error: 'That person is not in this server.' };
+  member.role = role;
+  persistNow();
+  bus.emit('members:changed', serverId);
+  bus.emit('server:sync', server);
+  return { ok: true, member, role: roleRecord(role) };
 }
 
 function ownershipError(what = 'server') {
@@ -350,7 +448,7 @@ function bootstrapServers() {
       createdAt: Date.now(),
       channelIds: [],
       defaultChannelId: null,
-      members: 1,
+      members: {},
       roles: {},
     };
     for (const [name, topic] of def.channels) {
@@ -381,7 +479,7 @@ function seedNewServerGreeting(server) {
     displayName: 'TalkingApp',
     handle: 'talkingapp',
     avatar: { kind: 'color', color: '#5865f2', color2: '#8b6ff5' },
-    text: `**${server.name} is live** 🎉\n\nThis is **#${ch?.name || 'general'}**. Hit **Invite** in the sidebar, send that link to anyone, and they land right here — everything you type shows up for them instantly.\n\n• **+** in the far-left rail starts another server\n• **Ctrl/⌘ K** finds any message\n• Click a message for reactions, replies and pins`,
+    text: `**${server.name} is live** 🎉\n\nThis is **#${ch?.name || 'general'}**. Hit **Invite** in the sidebar and send that link to anyone — they land in this server, and its name, icon and channels come with it.\n\n• **Server settings** → give people roles: admin, moderator, member or read-only\n• **Announcement channels** are read-only for everyone except staff\n• Messages stay in the shared log, so a new device sees the history\n• **Ctrl/⌘ K** finds any message`,
     ts: Date.now(),
     system: true,
     pinned: true,
@@ -403,7 +501,7 @@ function seedWelcomeMessages(serverId) {
       displayName: 'TalkingApp',
       handle: 'talkingapp',
       avatar: { kind: 'color', color: '#5865f2', color2: '#8b6ff5' },
-      text: '**Welcome to TalkingApp** 👋\n\nThis whole app runs in your browser — no accounts, no downloads. Open this link on another device and start talking; messages appear in real time.',
+      text: '**Welcome to TalkingApp** 👋\n\nEverything runs in your browser. Sign in with your username and password on another Chromebook and your servers, channels, messages and settings follow you.',
       ts: now - 1000 * 60 * 8,
       system: true,
       pinned: true,
@@ -416,7 +514,7 @@ function seedWelcomeMessages(serverId) {
       displayName: 'TalkingApp',
       handle: 'talkingapp',
       avatar: { kind: 'color', color: '#5865f2', color2: '#8b6ff5' },
-      text: '**Quick start**\n• Type in a channel and hit Enter\n• Create your own server with the **+** button in the sidebar rail\n• Click a name to see a profile, right-click a message for actions\n• Try `markdown`: **bold**, *italic*, `code`, ||spoiler|| and :tada: emoji',
+      text: '**Quick start**\n• Type in a channel and hit Enter\n• Create your own server with the **+** button in the sidebar rail\n• Settings → **Plans** for bigger uploads and more servers\n• Settings → **Backup & sync** keeps everything safe on another device\n• Try `markdown`: **bold**, *italic*, `code`, ||spoiler|| and :tada: emoji',
       ts: now - 1000 * 60 * 7,
       system: true,
       reactions: { '🔥': [] },
@@ -451,6 +549,15 @@ export function getServer(id) {
 export function createServer({ name, desc = '', color = null, emoji = '💬', isPublic = true, channels = ['general'] }) {
   const r = validateServerName(name);
   if (!r.ok) return { ok: false, error: r.error };
+  const owned = Object.values(state.servers).filter((srv) => srv.ownerId === state.self.id).length;
+  const plan = currentPlan();
+  if (serverSlotsLeft(plan.id, owned) <= 0) {
+    return {
+      ok: false,
+      error: `Your ${plan.name} plan covers ${limitsFor(plan.id).servers} servers. You can leave one, or switch plans in Settings → Plans.`,
+      planLimit: true,
+    };
+  }
   const server = {
     id: `s_${randId(10)}`,
     name: r.value,
@@ -463,8 +570,11 @@ export function createServer({ name, desc = '', color = null, emoji = '💬', is
     createdAt: Date.now(),
     channelIds: [],
     defaultChannelId: null,
-    members: 1,
+    members: {},
     roles: {},
+    memberRole: 'member',
+    notify: 'all',
+    inviteCode: `inv_${randId(9)}`,
     isStarter: false,
   };
   const names = channels.length ? channels : ['general'];
@@ -482,8 +592,10 @@ export function createServer({ name, desc = '', color = null, emoji = '💬', is
   }
   server.defaultChannelId = server.channelIds[0];
   state.servers[server.id] = server;
-  seedNewServerGreeting(server);
   state.users[state.self.id] = state.self;
+  ensureMember(server, state.self);
+  if (server.members[state.self.id]) server.members[state.self.id].role = 'owner';
+  seedNewServerGreeting(server);
 
   if (isPublic) registerNetworkCommunity(server);
 
@@ -496,33 +608,47 @@ export function createServer({ name, desc = '', color = null, emoji = '💬', is
 }
 
 /** Join a community discovered on the network (creates a mirror locally). */
-export function joinNetworkCommunity({ name, key, channels = [] }) {
+export function joinNetworkCommunity({ name, key, channels = [], card = null }) {
   const existing = Object.values(state.servers).find((s) => s.networkKey === key);
   if (existing) return { ok: true, server: existing, existing: true };
-  const r = validateServerName(name);
-  const safeName = r.ok ? r.value : name.slice(0, 32);
+  const r = validateServerName(card?.name || name);
+  const safeName = r.ok ? r.value : String(card?.name || name).slice(0, 32);
   const net = state.network[key];
   const server = {
     id: `s_${randId(10)}`,
     name: safeName,
-    desc: net?.topic || `A community on the TalkingApp network.`,
-    color: colorFromString(key, 55),
-    emoji: null,
+    desc: String(card?.desc || net?.topic || 'A community on the TalkingApp network.').slice(0, 180),
+    color: card?.color || colorFromString(key, 55),
+    emoji: card?.emoji ?? null,
     networkKey: key,
-    ownerId: null,
+    ownerId: card?.ownerId || null,
+    ownerName: card?.ownerName || null,
     isPublic: true,
     isRemote: true,
     createdAt: Date.now(),
     channelIds: [],
     defaultChannelId: null,
-    members: 1,
+    members: {},
     roles: {},
+    memberRole: 'member',
+    notify: 'all',
+    categories: Array.isArray(card?.categories) ? card.categories.slice(0, 12) : [],
   };
-  const names = (channels.length ? channels : net?.channels?.length ? [...net.channels] : ['general'])
-    .map((n) => String(n).toLowerCase())
-    .filter((n) => /^[a-z0-9_-]{1,28}$/.test(n));
-  for (const n of names.slice(0, 12)) {
-    const ch = createChannelRecord(server.id, n, '');
+  const channelDefs = Array.isArray(card?.channels) && card.channels.length
+    ? card.channels
+    : (channels.length ? channels : net?.channels?.length ? [...net.channels] : ['general']);
+  const names = [];
+  for (const def of channelDefs) {
+    const raw = typeof def === 'string' ? { name: def } : def || {};
+    const n = String(raw.name || '').toLowerCase();
+    if (!/^[a-z0-9_-]{1,28}$/.test(n) || names.some((x) => x.name === n)) continue;
+    names.push({ name: n, topic: String(raw.topic || '').slice(0, 140), category: String(raw.category || '').slice(0, 24), type: raw.type === 'announcement' ? 'announcement' : 'text' });
+  }
+  if (!names.length) names.push({ name: 'general', topic: '', category: '', type: 'text' });
+  for (const def of names.slice(0, limitsFor(currentPlan().id).channels)) {
+    const ch = createChannelRecord(server.id, def.name, def.topic);
+    ch.category = def.category;
+    ch.type = def.type;
     state.channels[ch.id] = ch;
     server.channelIds.push(ch.id);
   }
@@ -554,16 +680,19 @@ export function updateServer(id, patch) {
   if (patch.color != null) s.color = patch.color;
   if (patch.emoji !== undefined) s.emoji = patch.emoji;
   if (patch.isPublic != null) s.isPublic = Boolean(patch.isPublic);
+  if (patch.notify != null) s.notify = ['all', 'mentions', 'none'].includes(patch.notify) ? patch.notify : s.notify;
   persistNow();
   bus.emit('servers:changed');
   bus.emit('server:updated', s);
+  bus.emit('server:sync', s);
   return { ok: true, server: s };
 }
 
 export function deleteServer(id) {
   const s = state.servers[id];
   if (!s) return { ok: false, error: 'Server not found.' };
-  if (!canManageServer(s)) return ownershipError('server');
+  if (s.ownerId && s.ownerId !== state.self?.id) return { ok: false, error: 'Only the owner can delete this server.' };
+  if (!s.ownerId && !canManageServer(s)) return ownershipError('server');
   for (const cid of s.channelIds) {
     delete state.channels[cid];
     delete state.messages[cid];
@@ -585,30 +714,65 @@ export function deleteServer(id) {
   bus.emit('active:changed');
 }
 
+/** Leave a server: drop it from this device only. */
+export function forgetServer(id) {
+  const s = state.servers[id];
+  if (!s) return { ok: false, error: 'Server not found.' };
+  for (const cid of s.channelIds) {
+    delete state.channels[cid];
+    delete state.messages[cid];
+    delete state.reads[cid];
+    delete state.typing[cid];
+    tombstones.delete(cid);
+  }
+  delete state.servers[id];
+  if (state.ui.lastChannelByServer) delete state.ui.lastChannelByServer[id];
+  if (state.ui.activeServerId === id) {
+    const next = firstServerId();
+    if (next) selectServer(next, { force: true });
+    else {
+      state.ui.activeServerId = '@me';
+      state.ui.activeChannelId = null;
+    }
+  }
+  persistNow();
+  bus.emit('servers:changed');
+  bus.emit('network:changed');
+  bus.emit('active:changed');
+  return { ok: true };
+}
+
 export function leaveServer(id) {
   const s = state.servers[id];
   if (!s) return;
-  deleteServer(id);
+  forgetServer(id);
   toast(`You left ${s.name}`, 'info');
 }
 
 /* -------------------------------- channels ------------------------------- */
 
-export function createChannel(serverId, name, topic = '') {
+export function createChannel(serverId, name, topic = '', { category = '', type = 'text' } = {}) {
   const s = state.servers[serverId];
   if (!s) return { ok: false, error: 'Server not found.' };
-  if (!canManageServer(s)) return ownershipError('server');
+  if (!can(s, state.self?.id, CAP.manageChannels)) return ownershipError('server');
   const r = validateChannelName(name);
   if (!r.ok) return { ok: false, error: r.error };
   if (s.channelIds.some((cid) => state.channels[cid].name === r.value)) {
     return { ok: false, error: 'This server already has a channel with that name.' };
   }
+  const cap = limitsFor(currentPlan().id).channels;
+  if (s.channelIds.length >= cap) {
+    return { ok: false, error: `A server can have ${cap} channels on your plan. Settings → Plans raises that.`, planLimit: true };
+  }
   const ch = createChannelRecord(serverId, r.value, String(topic).slice(0, 140));
+  ch.category = String(category || '').slice(0, 24);
+  ch.type = type === 'announcement' ? 'announcement' : 'text';
   state.channels[ch.id] = ch;
   s.channelIds.push(ch.id);
   persistNow();
   bus.emit('channels:changed', serverId);
   bus.emit('servers:changed');
+  bus.emit('server:sync', s);
   return { ok: true, channel: ch };
 }
 
@@ -619,12 +783,17 @@ export function updateChannel(channelId, patch) {
   if (patch.name != null) {
     const r = validateChannelName(patch.name);
     if (!r.ok) return { ok: false, error: r.error };
+    const clash = state.servers[ch.serverId]?.channelIds.some((id) => id !== channelId && state.channels[id]?.name === r.value);
+    if (clash) return { ok: false, error: 'This server already has a channel with that name.' };
     ch.name = r.value;
   }
   if (patch.topic != null) ch.topic = String(patch.topic).slice(0, 140);
+  if (patch.category != null) ch.category = String(patch.category).slice(0, 24);
+  if (patch.type != null) ch.type = patch.type === 'announcement' ? 'announcement' : 'text';
   persistNow();
   bus.emit('channels:changed', ch.serverId);
   bus.emit('channel:updated', ch);
+  bus.emit('server:sync', state.servers[ch.serverId]);
   return { ok: true, channel: ch };
 }
 
@@ -645,6 +814,7 @@ export function deleteChannel(channelId) {
   persistNow();
   bus.emit('channels:changed', ch.serverId);
   bus.emit('servers:changed');
+  bus.emit('server:sync', s);
   return { ok: true };
 }
 
@@ -698,6 +868,10 @@ export function addMessage(channelId, msg, { persist: shouldPersist = true } = {
 export function sendMessage(channelId, text, { replyTo = null } = {}) {
   const ch = state.channels[channelId];
   if (!ch || !state.self) return null;
+  if (!canPostInChannel(channelId)) {
+    toast(ch.type === 'announcement' ? 'Only staff can post in an announcement channel.' : 'Your role in this server is read-only.', 'warn');
+    return null;
+  }
   const body = String(text || '').replace(/\s+$/, '');
   if (!body.trim()) return null;
   const msg = makeMessage({
@@ -735,26 +909,39 @@ export function findMessage(msgId, channelId = null) {
   return null;
 }
 
-export function editMessage(channelId, msgId, text) {
+export function editMessage(channelId, msgId, text, { broadcast = true } = {}) {
   const m = state.messages[channelId]?.find((x) => x.id === msgId);
   if (!m) return null;
   m.text = String(text).slice(0, 2000);
   m.editedTs = Date.now();
   persist();
   bus.emit('message:updated', { channelId, message: m });
-  bus.emit('message:editOut', { channelId, message: m });
+  if (broadcast) bus.emit('message:editOut', { channelId, message: m });
   return m;
 }
 
-export function deleteMessage(channelId, msgId) {
+const tombstones = new Map();   // channelId -> [messageId] recently deleted
+
+export function tombstonesFor(channelId) {
+  return tombstones.get(channelId) || [];
+}
+
+function rememberTombstone(channelId, msgId) {
+  const list = tombstones.get(channelId) || [];
+  if (!list.includes(msgId)) list.push(msgId);
+  tombstones.set(channelId, list.slice(-50));
+}
+
+export function deleteMessage(channelId, msgId, { broadcast = true } = {}) {
   const list = state.messages[channelId];
   if (!list) return;
   const i = list.findIndex((m) => m.id === msgId);
   if (i === -1) return;
   list.splice(i, 1);
+  rememberTombstone(channelId, msgId);
   persist();
   bus.emit('message:deleted', { channelId, messageId: msgId });
-  bus.emit('message:deleteOut', { channelId, messageId: msgId });
+  if (broadcast) bus.emit('message:deleteOut', { channelId, messageId: msgId });
 }
 
 export function toggleReaction(channelId, msgId, emoji, userId = state.self?.id) {
@@ -796,6 +983,208 @@ export function togglePin(channelId, msgId) {
 
 export function pinnedMessages(channelId) {
   return (state.messages[channelId] || []).filter((m) => m.pinned);
+}
+
+/* ------------------------- shared log (relay history) -------------------- */
+
+const LOG_MAX = 120;
+
+/** Compact, text-only copy of a channel for the relay's retained history. */
+export function logEntriesFor(channelId, limit = LOG_MAX) {
+  const ch = state.channels[channelId];
+  if (!ch || ch.type === 'dm') return [];
+  const list = (state.messages[channelId] || [])
+    .filter((m) => m.text && !m.pending && !m.failed && !m.system && m.userId !== 'talkingapp')
+    .slice(-limit);
+  return list.map((m) => ({
+    id: m.id,
+    u: m.userId,
+    n: m.displayName,
+    h: m.handle,
+    c: m.accentColor || null,
+    t: m.text.slice(0, 1200),
+    ts: m.ts,
+    pin: m.pinned ? 1 : 0,
+    e: m.editedTs ? 1 : 0,
+    a: m.avatar?.kind === 'image' ? 0 : 1,
+  }));
+}
+
+/** Apply a channel history digest from another device or from the relay. */
+export function mergeRemoteEntries({ key, channel, entries = [], removed = [] }) {
+  const server = Object.values(state.servers).find((s) => s.networkKey === key);
+  if (!server) return { ok: false, reason: 'no-server' };
+  const name = String(channel || 'general').toLowerCase();
+  let ch = server.channelIds.map((id) => state.channels[id]).find((c) => c && c.name === name);
+  if (!ch) {
+    // a channel that exists on the server owner's side but not here yet
+    if (server.ownerId === state.self?.id) return { ok: false, reason: 'looking-at-my-own-server' };
+    const created = createChannelRecord(server.id, name, '');
+    if (!created) return { ok: false, reason: 'bad-name' };
+    state.channels[created.id] = created;
+    server.channelIds.push(created.id);
+    ch = created;
+    bus.emit('channels:changed', server.id);
+  }
+  const list = state.messages[ch.id] || (state.messages[ch.id] = []);
+  const ids = new Set(list.map((m) => m.id));
+  let added = 0;
+  for (const raw of entries.slice(-LOG_MAX)) {
+    if (!raw?.id || !raw.t || ids.has(raw.id)) continue;
+    if (removed.includes(raw.id)) continue;
+    const msg = makeMessage({
+      channelId: ch.id,
+      userId: raw.u || 'unknown',
+      displayName: raw.n || 'Member',
+      handle: raw.h || 'member',
+      avatar: defaultAvatar(raw.n || 'Member'),
+      accentColor: raw.c || null,
+      text: String(raw.t).slice(0, 2000),
+      ts: Number(raw.ts) || Date.now(),
+      network: true,
+    });
+    msg.id = raw.id;
+    msg.pinned = Boolean(raw.pin);
+    msg.editedTs = raw.e ? raw.ts : null;
+    list.push(msg);
+    ids.add(raw.id);
+    added++;
+  }
+  let removedCount = 0;
+  if (removed.length) {
+    const kill = new Set(removed);
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (kill.has(list[i].id)) { list.splice(i, 1); removedCount++; }
+    }
+  }
+  if (added || removedCount) {
+    list.sort((a, b) => a.ts - b.ts);
+    persist();
+    bus.emit('messages:synced', { channelId: ch.id });
+    if (state.ui.activeChannelId === ch.id) bus.emit('message:new', { channelId: ch.id, message: list.at(-1) });
+    else bus.emit('channel:unread', { channelId: ch.id });
+  }
+  return { ok: true, channelId: ch.id, added, removed: removedCount };
+}
+
+/** A compact card describing a server, so members see the real thing. */
+export function serverCardFor(server) {
+  if (!server) return null;
+  const channels = server.channelIds
+    .map((id) => state.channels[id])
+    .filter(Boolean)
+    .slice(0, limitsFor(currentPlan().id).channels)
+    .map((c) => ({ name: c.name, topic: (c.topic || '').slice(0, 120), category: c.category || '', type: c.type || 'text' }));
+  const members = Object.values(server.members || {}).slice(0, 60).map((m) => ({ id: m.id, name: m.name, handle: m.handle, role: m.role }));
+  return {
+    key: server.networkKey,
+    name: server.name,
+    desc: (server.desc || '').slice(0, 180),
+    emoji: server.emoji || null,
+    color: server.color || null,
+    ownerId: server.ownerId || null,
+    ownerName: server.ownerId
+      ? (server.ownerId === state.self?.id ? state.self.displayName : state.users[server.ownerId]?.displayName || server.ownerName || null)
+      : null,
+    isPublic: server.isPublic !== false,
+    channels,
+    members,
+    savedAt: Date.now(),
+  };
+}
+
+/**
+ * Take what another member published about a server. We never let a card change
+ * a server we own — that is the whole point of ownership.
+ */
+export function ingestServerCard(card) {
+  if (!card?.key) return { ok: false, reason: 'no-key' };
+  const server = Object.values(state.servers).find((s) => s.networkKey === card.key);
+  if (!server) return { ok: false, reason: 'no-server' };
+  if (server.ownerId && server.ownerId === state.self?.id) return { ok: false, reason: 'mine' };
+  if (server.ownerId && card.ownerId && card.ownerId !== server.ownerId) return { ok: false, reason: 'owner-mismatch' };
+  let changed = false;
+  if (card.name && card.name !== server.name) { server.name = String(card.name).slice(0, 32); changed = true; }
+  if (card.desc != null && card.desc !== server.desc) { server.desc = String(card.desc).slice(0, 180); changed = true; }
+  if (card.emoji !== undefined && card.emoji !== server.emoji) { server.emoji = card.emoji; changed = true; }
+  if (card.color && card.color !== server.color) { server.color = card.color; changed = true; }
+  if (!server.ownerId && card.ownerId) { server.ownerId = card.ownerId; changed = true; }
+  if (card.ownerName && card.ownerName !== server.ownerName) { server.ownerName = card.ownerName; changed = true; }
+  if (Array.isArray(card.channels) && card.channels.length) {
+    for (const def of card.channels) {
+      const name = String(def?.name || '').toLowerCase();
+      if (!/^[a-z0-9_-]{1,28}$/.test(name)) continue;
+      const existing = server.channelIds.map((id) => state.channels[id]).find((c) => c && c.name === name);
+      if (existing) {
+        const cat = String(def.category || '').slice(0, 24);
+        if (cat !== (existing.category || '')) { existing.category = cat; changed = true; }
+        const topic = String(def.topic || '').slice(0, 140);
+        if (topic && topic !== existing.topic) { existing.topic = topic; changed = true; }
+        if ((def.type === 'announcement') !== (existing.type === 'announcement')) {
+          existing.type = def.type === 'announcement' ? 'announcement' : 'text';
+          changed = true;
+        }
+      } else if (server.channelIds.length < 60) {
+        const ch = createChannelRecord(server.id, name, String(def.topic || '').slice(0, 140));
+        ch.category = String(def.category || '').slice(0, 24);
+        ch.type = def.type === 'announcement' ? 'announcement' : 'text';
+        state.channels[ch.id] = ch;
+        server.channelIds.push(ch.id);
+        changed = true;
+      }
+    }
+  }
+  if (Array.isArray(card.members) && card.members.length) {
+    server.members = server.members || {};
+    for (const m of card.members.slice(0, 60)) {
+      if (!m?.id) continue;
+      const prev = server.members[m.id];
+      if (m.role === 'owner' && m.id !== server.ownerId) continue;
+      server.members[m.id] = {
+        id: m.id,
+        name: m.name || prev?.name || 'Member',
+        handle: m.handle || prev?.handle || 'member',
+        role: m.role === 'owner' ? 'owner' : (isRoleId(m.role) ? m.role : (prev?.role || 'member')),
+        plan: prev?.plan || 'free',
+        since: prev?.since || Date.now(),
+      };
+      changed = true;
+    }
+  }
+  if (changed) {
+    persist();
+    bus.emit('servers:changed');
+    bus.emit('members:changed', server.id);
+    bus.emit('server:updated', server);
+  }
+  return { ok: true, server, changed };
+}
+
+export function setServerNotify(serverId, level) {
+  const server = state.servers[serverId];
+  if (!server) return { ok: false, error: 'Server not found.' };
+  server.notify = ['all', 'mentions', 'none'].includes(level) ? level : 'all';
+  persistNow();
+  bus.emit('servers:changed');
+  bus.emit('server:updated', server);
+  return { ok: true, notify: server.notify };
+}
+
+/* --------------------------------- plans --------------------------------- */
+
+export function currentPlan() {
+  const id = state.settings?.plan;
+  return planOf(isPlanId(id) ? id : DEFAULT_PLAN);
+}
+
+export function setPlan(planId) {
+  if (!isPlanId(planId)) return { ok: false, error: 'Unknown plan.' };
+  state.settings.plan = planId;
+  if (state.self) state.self.plan = planId;
+  persistNow();
+  bus.emit('settings:changed', { key: 'plan', value: planId });
+  bus.emit('plan:changed', planOf(planId));
+  return { ok: true, plan: planOf(planId) };
 }
 
 /* --------------------------------- reads --------------------------------- */
@@ -1151,6 +1540,7 @@ export function applySnapshot(snap, { replaceLocal = true } = {}) {
   state.dmChannels = snap.dmChannels || {};
   state.blocked = snap.blocked || {};
   state.settings = { ...DEFAULT_SETTINGS, ...(snap.settings || {}) };
+  state.self.plan = isPlanId(state.settings.plan) ? state.settings.plan : DEFAULT_PLAN;
 
   for (const srv of Object.values(state.servers)) {
     srv.channelIds = (srv.channelIds || []).filter((id) => state.channels[id]);
@@ -1161,6 +1551,10 @@ export function applySnapshot(snap, { replaceLocal = true } = {}) {
     }
     srv.defaultChannelId = srv.channelIds.includes(srv.defaultChannelId) ? srv.defaultChannelId : srv.channelIds[0];
     srv.networkKey = srv.networkKey || networkKeyFor(srv.name);
+    srv.notify = ['all', 'mentions', 'none'].includes(srv.notify) ? srv.notify : 'all';
+    srv.inviteCode = srv.inviteCode || `inv_${randId(9)}`;
+    srv.members = srv.members && typeof srv.members === 'object' ? srv.members : {};
+    if (srv.ownerId === state.self.id && srv.members[state.self.id]) srv.members[state.self.id].role = 'owner';
   }
   if (!state.ui || !state.ui.activeServerId) {
     state.ui.activeServerId = snap.ui?.activeServerId && state.servers[snap.ui.activeServerId] ? snap.ui.activeServerId : Object.keys(state.servers)[0] || '@me';
