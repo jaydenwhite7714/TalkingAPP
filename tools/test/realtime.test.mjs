@@ -219,6 +219,59 @@ await t.test('rotating the invite link moves everyone and tells the room', async
   if (store.isListed(moved.server)) throw new Error('rotating made it public');
 });
 
+await t.test('a thread reply reaches the relay carrying its parent channel', async () => {
+  await drain(200);
+  const parent = store.sendMessage(general.id, 'does anyone else see this thread?');
+  if (!parent) throw new Error('could not post the parent message');
+  const { thread } = store.createThread({ channelId: general.id, messageId: parent.id });
+  await sleep(200);
+  const reply = store.sendMessage(thread.id, 'a reply that travels over the relay');
+  if (!reply) throw new Error('the thread refused the reply');
+
+  const frame = await waitFor((f) => f.includes('a reply that travels over the relay'));
+  if (!frame) throw new Error('the thread reply never reached the relay');
+  const packet = JSON.parse(frame);
+  if (packet.kind !== 'chat') throw new Error(`unexpected packet ${packet.kind}`);
+  if (packet.thread?.id !== thread.id) throw new Error('the packet does not carry the thread id');
+  if (packet.thread?.parentChannel !== 'general') throw new Error('the packet lost the parent channel');
+  if (packet.channel !== 'general') throw new Error('the packet named the thread instead of its channel');
+
+  // and the thread keeps a retained digest of its own
+  const { publishChannelLogNow } = await import(`${ROOT}/assets/js/shared.js`);
+  const sent = publishChannelLogNow(thread.id);
+  if (!sent) throw new Error('the thread published no history digest');
+});
+
+await t.test('a second device turns that packet into a real thread', async () => {
+  const { server: foreign, ch: parent } = (() => {
+    const card = {
+      key: 'p_relaythreaddevice1', name: 'Thread Device Room', ownerId: 'u_owner', ownerName: 'Owner',
+      savedAt: Date.now(), channels: [{ name: 'general', type: 'text' }], members: [{ id: 'u_owner', role: 'owner', name: 'Owner', handle: 'owner' }],
+    };
+    const joined = store.joinByInvite({ key: card.key, name: card.name, card });
+    if (!joined.ok) throw new Error(joined.error);
+    const ch = joined.server.channelIds.map((id) => store.state.channels[id])[0];
+    return { server: joined.server, ch };
+  })();
+
+  // the owner's device sends a chat packet that is a thread reply
+  other.send(JSON.stringify({
+    v: 1, sid: 'other-sid', id: 'p_thread', ts: Date.now(), kind: 'chat',
+    key: foreign.networkKey, serverName: foreign.name, channel: parent.name,
+    thread: { id: 'th_fromdevice1', name: 'Synced thread', parentChannel: parent.name },
+    msgId: 'm_thread1', text: 'a thread reply from the other device', msgTs: Date.now(),
+    from: { id: 'u_owner', displayName: 'Owner', handle: 'owner', avatar: { kind: 'color', color: '#5865f2' } },
+  }));
+  await sleep(900);
+
+  const thread = store.state.channels['th_fromdevice1'];
+  if (!thread) throw new Error('the receiving device never created the thread');
+  if (thread.parentChannelId !== parent.id) throw new Error('the thread was attached to the wrong channel');
+  if (!store.state.messages[thread.id].some((m) => m.text === 'a thread reply from the other device')) {
+    throw new Error('the reply landed outside the thread');
+  }
+});
+
 await t.test('the app never logged a console error while doing all that', () => {
   const real = errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom/i.test(e));
   if (real.length) throw new Error(real.slice(0, 3).join(' | '));

@@ -7,6 +7,7 @@ import {
   deleteMessage, networkKeyFor, addMessage, setMessageAttachment,
   touchMember, canModerateChannel, canPostInChannel, currentPlan,
   isBlocked, joinByInvite, isListed, joinNetworkCommunity,
+  ensureThreadChannel, threadsForChannel, threadParent, slowmodeRemaining,
 } from './store.js';
 import { initShared, flushPending, applyPendingForServer, cardFor, publishAllNow, sendCardTo } from './shared.js';
 import { defaultAvatar, ensureWireAvatar } from './avatar.js';
@@ -263,6 +264,26 @@ function resolveIncomingChannel(p, { create = true } = {}) {
   return ch || null;
 }
 
+/** Turn an incoming thread descriptor into a local thread channel. */
+function resolveIncomingThread(p) {
+  if (!p?.thread?.id) return null;
+  const server = Object.values(state.servers).find((s) => s.networkKey === p.key);
+  if (!server) return null;
+  const existing = state.channels[p.thread.id];
+  if (existing) return existing;
+  const parent = server.channelIds
+    .map((id) => state.channels[id])
+    .find((c) => c && c.name === String(p.thread.parentChannel || p.channel || '').toLowerCase());
+  return ensureThreadChannel({
+    serverId: server.id,
+    id: p.thread.id,
+    parentChannelId: parent?.id || null,
+    parentMessageId: p.thread.parentMessageId || null,
+    name: p.thread.name || 'Thread',
+    ownerId: p.from?.id || null,
+  });
+}
+
 /** Network handlers that must exist before the app is unlocked (vault, usernames). */
 function wireAccountNetwork() {
   bus.on('net:vault', (p) => ingestVaultPacket(p));
@@ -301,12 +322,16 @@ function wireEvents() {
     }
     const s = state.servers[ch.serverId];
     if (!s) return;
+    const parent = ch.type === 'thread' ? threadParent(ch) : null;
     const sent = net.sendChat({
       serverKey: s.networkKey,
       serverName: s.name,
       serverTopic: s.desc,
       channels: s.channelIds.map((id) => state.channels[id]?.name).filter(Boolean),
-      channel: ch.name,
+      channel: parent ? parent.name : ch.name,
+      thread: ch.type === 'thread'
+        ? { id: ch.id, name: ch.name, parentChannel: parent?.name || '', parentMessageId: ch.parentMessageId || null }
+        : null,
       message,
     });
     message.queued = !sent;
@@ -393,7 +418,7 @@ function wireEvents() {
   bus.on('net:presence', ({ peer }) => applyPeer(peer));
 
   bus.on('net:chat', (p) => {
-    const ch = resolveIncomingChannel(p);
+    const ch = p.thread?.id ? resolveIncomingThread(p) : resolveIncomingChannel(p);
     const from = p.from;
     state.users[from.id] = { ...(state.users[from.id] || {}), ...from };
     if (!ch) {
@@ -511,13 +536,33 @@ function wireEvents() {
       .slice(-20)
       .map((m) => ({ id: m.id, userId: m.userId, displayName: m.displayName, handle: m.handle, avatar: m.avatar?.kind === 'image' ? null : m.avatar, text: m.text, ts: m.ts }));
     const channels = server.channelIds.map((id) => state.channels[id]).filter(Boolean);
+    // threads keep their own history, so answer for them as well
+    const threads = (server.threadIds || []).map((id) => state.channels[id]).filter(Boolean);
     const total = channels.reduce((n, ch) => n + (state.messages[ch.id]?.length || 0), 0);
     if (!total) return;
-    // stagger the replies a little so several peers answering at once stay gentle
-    channels.forEach((ch, i) => {
+    let i = 0;
+    const answer = (ch, thread = null) => {
       const entries = entriesFor(ch);
       if (!entries.length) return;
-      setTimeout(() => net.sendHistory({ serverKey: server.networkKey, channel: ch.name, entries, to: p.from.id }), 120 * i);
+      const delay = 120 * i++;
+      setTimeout(() => net.sendHistory({
+        serverKey: server.networkKey,
+        channel: thread ? `thread-${ch.id}` : ch.name,
+        entries,
+        to: p.from.id,
+        thread,
+      }), delay);
+    };
+    // stagger the replies a little so several peers answering at once stay gentle
+    channels.forEach((ch) => answer(ch));
+    threads.forEach((t) => {
+      const parent = threadParent(t);
+      answer(t, {
+        id: t.id,
+        name: t.name,
+        parentChannel: parent?.name || '',
+        parentMessageId: t.parentMessageId || null,
+      });
     });
   });
 
@@ -525,7 +570,7 @@ function wireEvents() {
     if (p.to && p.to !== state.self?.id) return;
     const server = Object.values(state.servers).find((s) => s.networkKey === p.key);
     if (!server) return;
-    const ch = resolveIncomingChannel(p, { create: true });
+    const ch = p.thread?.id ? resolveIncomingThread(p) : resolveIncomingChannel(p, { create: true });
     if (!ch) return;
     let added = 0;
     for (const entry of p.entries || []) {

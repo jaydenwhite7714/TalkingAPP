@@ -6,6 +6,7 @@ import {
   state, selectServer, selectChannel, dmList, unreadCount, mentionCount, markRead,
   pinnedMessages, openDM, toast, setSetting, firstServerId, canManageServer,
   memberList, roleOf, setServerNotify, canModerateChannel, isBlocked, toggleBlockUser,
+  threadsForChannel, threadReplyCount, threadParent, deleteThread,
 } from '../store.js';
 import { roleChipHTML, roleRecord } from '../perms.js';
 import { planBadgeHTML, planForUser } from '../plans.js';
@@ -335,6 +336,53 @@ function renderSidebar() {
         actions.append(gear);
         item.append(actions);
         list.append(item);
+
+        // threads that grew out of this channel, nested underneath it
+        for (const thread of threadsForChannel(cid)) {
+          const tUnread = unreadCount(thread.id);
+          const replies = threadReplyCount(thread.id);
+          const tActive = state.ui.activeChannelId === thread.id;
+          const tItem = el('a', {
+            class: `channel-item thread-item${tActive ? ' is-active' : ''}${tUnread ? ' unread' : ''}`,
+            'data-channel': thread.id,
+            'data-thread': thread.id,
+            tabindex: '0',
+            role: 'link',
+            title: `${thread.name} — thread in #${ch.name}`,
+            onclick: (e) => { e.preventDefault(); goToChannel(thread.id); },
+            onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goToChannel(thread.id); } },
+          },
+            icon('thread', 15),
+            el('span', { class: 'ch-name', text: thread.name }),
+            replies ? el('span', { class: 'thread-count', text: String(replies) }) : null,
+          );
+          if (tUnread && !replies) tItem.append(el('span', { class: 'badge', text: String(tUnread) }));
+          tItem.append(el('span', { class: 'channel-actions' },
+            canModerateChannel(thread.id) ? el('button', {
+              type: 'button', 'aria-label': 'Thread options', title: 'Thread options',
+              onclick: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openMenu({
+                  items: [
+                    { label: 'Copy thread link', icon: 'link', onClick: async () => {
+                      const { copyToClipboard } = await import('../util.js');
+                      await copyToClipboard(`${location.origin}${location.pathname}#/channel/${thread.id}`);
+                      toast('Thread link copied', 'ok');
+                    } },
+                    { label: 'Delete thread', icon: 'trash', danger: true, onClick: () => {
+                      const res = deleteThread(thread.id);
+                      if (!res.ok) toast(res.error || 'Could not delete', 'warn');
+                      else toast('Thread deleted', 'ok');
+                    } },
+                  ],
+                  at: e, align: 'end',
+                });
+              },
+            }, icon('settings', 13)) : null,
+          ));
+          list.append(tItem);
+        }
       }
       group.append(list);
       scroll.append(group);
@@ -523,6 +571,19 @@ function renderHeader() {
     obj.innerHTML = `${avatarHTML(user, { size: 26 })}<h2 style="max-width:220px">${escapeHtml(user.displayName)}</h2>`;
     headerEl.append(obj);
     headerEl.append(el('span', { class: 'ch-topic', html: `<span style="color:var(--${presence === 'online' ? 'green' : 'text-3'})">${presence === 'online' ? 'Online' : 'Offline'}</span> · @${escapeHtml(ch.handle)}` }));
+  } else if (ch.type === 'thread') {
+    const parent = threadParent(ch);
+    headerEl.append(el('span', { class: 'ch-glyph thread-glyph' }, icon('thread', 22)));
+    headerEl.append(el('h2', { text: ch.name }));
+    headerEl.append(el('button', {
+      class: 'thread-back link-btn', type: 'button',
+      title: parent ? `Back to #${parent.name}` : 'Back to the channel',
+      onclick: () => { if (parent) goToChannel(parent.id); },
+    }, parent ? `#${parent.name}` : 'channel'));
+    headerEl.append(el('button', {
+      class: 'icon-btn', type: 'button', title: 'Close thread', 'aria-label': 'Close thread',
+      onclick: () => { if (parent) goToChannel(parent.id); },
+    }, icon('close', 17)));
   } else {
     headerEl.append(el('span', { class: 'ch-glyph' }, icon('hash', 22)));
     headerEl.append(el('h2', { text: ch.name }));

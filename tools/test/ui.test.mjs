@@ -296,6 +296,118 @@ await t.test('creating an invite-only server gives a private link and hides it f
   if (!link.includes('?invite=')) throw new Error(`the link is not an invite link: ${link}`);
 });
 
+/* ------------------------------ threads in the UI ------------------------- */
+
+await t.test('replying in a thread opens it and keeps the reply out of the channel', async () => {
+  const { messageMenu } = await import(`${ROOT}/assets/js/views/messages.js`);
+  store.selectChannel(general.id, { serverId: studio.id });
+  await sleep(200);
+  const parent = store.sendMessage(general.id, 'thread me please');
+  await sleep(200);
+  const node = [...document.querySelectorAll('.message')].find((n) => n.textContent.includes('thread me please'));
+  if (!node) throw new Error('the parent message never rendered');
+
+  messageMenu(store.state.messages[general.id].find((m) => m.id === parent.id), node.querySelector('.msg-toolbar button') || node);
+  await sleep(80);
+  const make = [...document.querySelectorAll('.menu-item')].find((n) => /Create thread/i.test(n.textContent));
+  if (!make) throw new Error('no way to start a thread from a message');
+  make.click();
+  await sleep(350);
+
+  const thread = store.state.channels[store.state.ui.activeChannelId];
+  if (thread?.type !== 'thread') throw new Error('opening the thread did not navigate into it');
+  if (!document.querySelector('.thread-intro')) throw new Error('the thread has no header explaining where it came from');
+  if (!document.querySelector('.thread-parent-msg')) throw new Error('the parent message is not quoted at the top');
+  const input = document.getElementById('composerInput');
+  if (!/Reply in/.test(input.getAttribute('placeholder') || '')) throw new Error(`placeholder is "${input.getAttribute('placeholder')}"`);
+
+  input.value = 'a reply inside the thread';
+  input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(300);
+  if (!document.getElementById('messagesScroll').textContent.includes('a reply inside the thread')) {
+    throw new Error('the thread reply did not render');
+  }
+  if (store.threadReplyCount(thread.id) !== 1) throw new Error('the reply was not counted');
+
+  // the channel itself stays clean
+  store.selectChannel(general.id, { serverId: studio.id });
+  await sleep(250);
+  if (document.getElementById('messagesScroll').textContent.includes('a reply inside the thread')) {
+    throw new Error('the thread reply leaked into the channel');
+  }
+  const chip = [...document.querySelectorAll('.thread-chip')].find((n) => n.dataset.thread === thread.id);
+  if (!chip) throw new Error('the parent message has no thread chip');
+  if (!/1 repl/i.test(chip.textContent)) throw new Error(`chip says "${chip.textContent}"`);
+  chip.click();
+  await sleep(300);
+  if (store.state.ui.activeChannelId !== thread.id) throw new Error('the chip did not reopen the thread');
+  store.selectChannel(general.id, { serverId: studio.id });
+});
+
+/* ------------------------------ slowmode in the UI ------------------------ */
+
+await t.test('slowmode shows up in the composer and locks it for a member', async () => {
+  const slowChannel = studio.channelIds.map((id) => store.state.channels[id]).find((c) => c.name === 'random');
+  store.selectChannel(slowChannel.id, { serverId: studio.id });
+  await sleep(150);
+  slowChannel.slowmode = 30;
+  const mine = store.sendMessage(slowChannel.id, 'the first one');
+  if (!mine) throw new Error('could not post the first message');
+  store.selectChannel(general.id, { serverId: studio.id });
+  await sleep(120);
+  store.selectChannel(slowChannel.id, { serverId: studio.id });
+  await sleep(250);
+
+  // the owner is staff, so they are exempt — the bar still explains the rule
+  const bar = document.querySelector('.composer-slowmode');
+  if (!bar) throw new Error('no slowmode note above the composer');
+  if (!/moderators are exempt/i.test(bar.textContent)) throw new Error(`note says "${bar.textContent.slice(0, 60)}"`);
+  if (document.getElementById('composerInput').disabled) throw new Error('the owner was locked out of their own channel');
+  slowChannel.slowmode = 0;
+});
+
+/* --------------------------- saved messages in the UI --------------------- */
+
+await t.test('a saved message appears in Settings and opens its channel', async () => {
+  const msg = store.sendMessage(general.id, 'keep this one around');
+  await sleep(150);
+  store.toggleSaved(msg);
+  const { openSettings } = await import(`${ROOT}/assets/js/views/modals.js`);
+  const { closeAllModals } = await import(`${ROOT}/assets/js/ui/modal.js`);
+  closeAllModals();
+  openSettings('saved');
+  await sleep(250);
+  const rows = [...document.querySelectorAll('.saved-row')];
+  if (!rows.length) throw new Error('the saved tab is empty');
+  const row = rows.find((r) => r.textContent.includes('keep this one around'));
+  if (!row) throw new Error('the saved message is missing from the list');
+  const open = [...row.querySelectorAll('button')].find((b) => /Open/.test(b.textContent));
+  open.click();
+  await sleep(300);
+  if (store.state.ui.activeChannelId !== general.id) throw new Error('Open did not jump to the channel');
+  if (document.getElementById('modalRoot').children.length) throw new Error('the settings modal stayed open');
+});
+
+/* ------------------------------- audit log in the UI ---------------------- */
+
+await t.test('the audit log lists what staff did', async () => {
+  const { openServerSettings } = await import(`${ROOT}/assets/js/views/modals.js`);
+  const { closeAllModals } = await import(`${ROOT}/assets/js/ui/modal.js`);
+  const made = store.createChannel(studio.id, 'audit-visible');
+  if (!made.ok) throw new Error(made.error);
+  closeAllModals();
+  openServerSettings(studio);
+  await sleep(250);
+  const rows = [...document.querySelectorAll('.audit-row')];
+  if (!rows.length) throw new Error('the audit log rendered nothing');
+  if (!rows.some((r) => /created a channel/.test(r.textContent))) {
+    throw new Error(`the newest action is missing: ${rows[0]?.textContent}`);
+  }
+  if (!rows.some((r) => /audit-visible/.test(r.textContent))) throw new Error('the entry does not name the channel');
+  closeAllModals();
+  store.deleteChannel(made.channel.id);
+});
+
 await t.test('no console errors were logged during the whole session', () => {
   const real = errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom/i.test(e));
   if (real.length) throw new Error(real.slice(0, 4).join(' | '));

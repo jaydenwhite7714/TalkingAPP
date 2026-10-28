@@ -443,6 +443,194 @@ await t.test('a card can never make a private server public', () => {
   if (store.isListed(priv)) throw new Error('a card turned a private server public');
 });
 
+/* ---------------------------- threads, for real --------------------------- */
+
+await t.test('a thread keeps its replies out of the channel', () => {
+  const parent = store.sendMessage(general.id, 'should we take this to a thread?');
+  if (!parent) throw new Error('could not post the parent message');
+  const res = store.createThread({ channelId: general.id, messageId: parent.id });
+  if (!res.ok) throw new Error(res.error);
+  const thread = res.thread;
+  if (lab.channelIds.includes(thread.id)) throw new Error('the thread leaked into the channel list');
+  if (!lab.threadIds.includes(thread.id)) throw new Error('the server does not know about its thread');
+  if (store.threadParent(thread)?.id !== general.id) throw new Error('the thread lost its parent');
+
+  store.sendMessage(thread.id, 'first reply');
+  store.sendMessage(thread.id, 'second reply');
+  if (store.threadReplyCount(thread.id) !== 2) throw new Error(`reply count is ${store.threadReplyCount(thread.id)}`);
+  if (store.state.messages[general.id].some((m) => m.text === 'first reply')) {
+    throw new Error('a thread reply showed up in the channel');
+  }
+  if (store.threadsForChannel(general.id).length !== 1) throw new Error('the sidebar would not show the thread once');
+});
+
+await t.test('opening the same thread twice reuses it', () => {
+  const parent = store.state.messages[general.id].find((m) => m.text === 'should we take this to a thread?');
+  const again = store.createThread({ channelId: general.id, messageId: parent.id });
+  if (!again.ok) throw new Error(again.error);
+  if (!again.existing) throw new Error('a second thread was created on the same message');
+  if (store.threadsForChannel(general.id).length !== 1) throw new Error('duplicate threads appeared');
+});
+
+await t.test('deleting a thread takes its replies with it', () => {
+  const parent = store.sendMessage(general.id, 'temporary thread');
+  const { thread } = store.createThread({ channelId: general.id, messageId: parent.id });
+  store.sendMessage(thread.id, 'gone soon');
+  const res = store.deleteThread(thread.id);
+  if (!res.ok) throw new Error(res.error || 'could not delete');
+  if (store.state.channels[thread.id]) throw new Error('the thread channel survived');
+  if (store.state.messages[thread.id]) throw new Error('the replies survived');
+  if (lab.threadIds.includes(thread.id)) throw new Error('the server still lists it');
+});
+
+await t.test('thread history arriving from the network rebuilds the thread', () => {
+  // a server I am only a member of: the owner's thread has to be recreated here
+  const { server: foreign, ch: parent } = foreignChannel();
+  const before = store.threadsForChannel(parent.id).length;
+  const res = store.mergeRemoteEntries({
+    key: foreign.networkKey,
+    channel: 'thread-th_remotethread1',
+    thread: { id: 'th_remotethread1', name: 'From the relay', parentChannel: parent.name },
+    entries: [{ id: 'm_remote1', u: 'u_owner', n: 'Owner', h: 'owner', t: 'hello from another device', ts: Date.now() - 1000 }],
+  });
+  if (!res.ok) throw new Error(res.reason || 'thread history was refused');
+  const thread = store.state.channels['th_remotethread1'];
+  if (!thread) throw new Error('the thread was not created');
+  if (thread.parentChannelId !== parent.id) throw new Error('the thread landed in the wrong channel');
+  if (store.threadsForChannel(parent.id).length !== before + 1) throw new Error('the thread is not attached to the channel');
+  if (!store.state.messages[thread.id].some((m) => m.text === 'hello from another device')) {
+    throw new Error('the history did not land');
+  }
+
+  // my own server is never rewritten by a stray log packet
+  const mine = store.mergeRemoteEntries({
+    key: lab.networkKey,
+    channel: 'thread-th_stranger01',
+    thread: { id: 'th_stranger01', name: 'Not mine', parentChannel: general.name },
+    entries: [{ id: 'm_remote2', u: 'u_x', n: 'X', h: 'x', t: 'injected', ts: Date.now() }],
+  });
+  if (mine.ok) throw new Error('a remote packet created a thread on my own server');
+});
+
+await t.test('a thread inherits the slowmode of its channel', () => {
+  const ch = lab.channelIds.map((id) => store.state.channels[id]).find((c) => c.name === 'random') || general;
+  const parent = store.sendMessage(ch.id, 'slow parent message');
+  if (!parent) throw new Error('could not seed the parent');
+  ch.slowmode = 10;
+  const { thread } = store.createThread({ channelId: ch.id, messageId: parent.id });
+  if (store.slowmodeFor(thread.id) !== 10) throw new Error('the thread ignored the slowmode');
+  ch.slowmode = 0;
+
+  // a plain member feels it, a moderator does not
+  const { ch: memberChannel } = foreignChannel();
+  for (const m of store.state.messages[memberChannel.id] || []) {
+    if (m.userId === store.state.self.id) m.ts -= 600000;
+  }
+  memberChannel.slowmode = 30;
+  const first = store.sendMessage(memberChannel.id, 'first');
+  if (!first) throw new Error('the first message was blocked');
+  const second = store.sendMessage(memberChannel.id, 'second');
+  if (second) throw new Error('slowmode let a second message through');
+  const foreign = store.state.servers[memberChannel.serverId];
+  foreign.members[store.state.self.id].role = 'moderator';
+  const third = store.sendMessage(memberChannel.id, 'staff speaking');
+  if (!third) throw new Error('slowmode blocked a moderator');
+  foreign.members[store.state.self.id].role = 'member';
+  const left = store.slowmodeRemaining(memberChannel.id);
+  if (!(left > 0 && left <= 30)) throw new Error(`countdown looks wrong: ${left}`);
+  memberChannel.slowmode = 0;
+});
+
+await t.test('only the offered slowmode values are accepted', () => {
+  const res = store.updateChannel(general.id, { slowmode: 7 });
+  if (res.ok) throw new Error('an invented slowmode was accepted');
+  const good = store.updateChannel(general.id, { slowmode: 30 });
+  if (!good.ok) throw new Error(good.error);
+  if (store.state.channels[general.id].slowmode !== 30) throw new Error('slowmode did not stick');
+  store.updateChannel(general.id, { slowmode: 0 });
+});
+
+/* -------------------------------- audit log ------------------------------ */
+
+await t.test('staff actions land in the audit log, newest first', () => {
+  store.state.settings.plan = 'studio';
+  const made = store.createChannel(lab.id, 'audit-room', 'for the log');
+  if (!made.ok) throw new Error(made.error);
+  const top = store.auditLog(lab.id)[0];
+  if (top?.action !== 'channel.create') throw new Error(`newest entry is ${top?.action}`);
+  if (!top.actorId) throw new Error('the entry has no actor');
+  store.deleteChannel(made.channel.id);
+  if (store.auditLog(lab.id)[0].action !== 'channel.delete') throw new Error('the delete was not recorded');
+  if (!/'audit-room'|audit-room/.test(store.auditLog(lab.id)[0].detail)) throw new Error('the entry does not say what was deleted');
+});
+
+await t.test('role changes and invite rotations are recorded too', () => {
+  store.setMemberRole(lab.id, 'bob', 'admin');
+  const roleEntry = store.auditLog(lab.id).find((e) => e.action === 'member.role');
+  if (!roleEntry) throw new Error('a role change was not logged');
+  const priv = store.createServer({ name: 'Audited Vault', visibility: 'invite', channels: ['general'] });
+  store.rotateInviteLink(priv.server.id);
+  if (!store.auditLog(priv.server.id).some((e) => e.action === 'server.rekey')) throw new Error('the rotated link was not logged');
+});
+
+await t.test('moderator deletions are logged, self-deletions are not', () => {
+  const { ch } = foreignChannel();
+  const theirs = store.makeMessage({ channelId: ch.id, userId: 'u_stranger2', displayName: 'Stranger', handle: 'stranger', text: 'delete me', network: true });
+  store.addMessage(ch.id, theirs);
+  const foreign = store.state.servers[ch.serverId];
+  foreign.members[store.state.self.id].role = 'moderator';
+  const before = store.auditLog(foreign.id).length;
+  store.deleteMessage(ch.id, theirs.id);
+  if (store.auditLog(foreign.id).length <= before) throw new Error('the moderator delete was not logged');
+  if (!store.auditLog(foreign.id)[0].detail.includes('Stranger')) throw new Error('the log does not name the author');
+  foreign.members[store.state.self.id].role = 'member';
+});
+
+await t.test('the audit log travels with a backup', () => {
+  const snap = store.snapshotState();
+  if (!snap.audit?.[lab.id]?.length) throw new Error('the audit log is missing from the snapshot');
+  snap.blocked = snap.blocked || {};
+  const before = store.auditLog(lab.id).length;
+  store.applySnapshot(snap, { replaceLocal: false });
+  if (store.auditLog(lab.id).length !== before) throw new Error('restoring lost audit entries');
+});
+
+/* ----------------------------- saved messages ---------------------------- */
+
+await t.test('a saved message keeps a copy you can get back to', () => {
+  const msg = store.sendMessage(general.id, 'this one is worth keeping');
+  if (!msg) throw new Error('could not post');
+  const on = store.toggleSaved(msg);
+  if (!on.ok || !on.saved) throw new Error('saving did nothing');
+  if (!store.isSaved(msg.id)) throw new Error('isSaved disagrees');
+  const entry = store.savedList().find((x) => x.msgId === msg.id);
+  if (entry.text !== 'this one is worth keeping') throw new Error('the saved copy lost its text');
+  if (entry.channelId !== general.id) throw new Error('the saved copy lost its channel');
+
+  const off = store.toggleSaved(msg);
+  if (!off.ok || off.saved) throw new Error('unsaving did nothing');
+  if (store.isSaved(msg.id)) throw new Error('it is still saved');
+
+  store.toggleSaved(msg);
+});
+
+await t.test('saved messages survive a snapshot and a wipe of the screen', () => {
+  const msg = store.state.messages[general.id].find((m) => m.text === 'this one is worth keeping');
+  if (!msg) throw new Error('lost the message');
+  if (!store.isSaved(msg.id)) throw new Error('the message was not saved');
+  const snap = store.snapshotState();
+  if (!snap.saved.some((x) => x.msgId === msg.id)) throw new Error('the snapshot dropped it');
+  store.removeSaved(msg.id);
+  if (store.isSaved(msg.id)) throw new Error('removing did nothing');
+});
+
+await t.test('system notices cannot be saved', () => {
+  const notice = store.makeMessage({ channelId: general.id, userId: 'talkingapp', displayName: 'TalkingApp', handle: 'app', text: 'a system note', system: true });
+  store.addMessage(general.id, notice);
+  const res = store.toggleSaved(notice);
+  if (res.ok) throw new Error('a system notice was bookmarked');
+});
+
 const failed = t.finish('logic checks');
 window.close();
 process.exit(failed ? 1 : 0);

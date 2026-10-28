@@ -77,6 +77,8 @@ export const state = {
   },
   dmChannels: {},   // userId -> channelId
   blocked: {},
+  saved: [],        // bookmarked messages, newest first
+  audit: {},        // serverId -> newest-first log of staff actions
   typingUsers: {},
 };
 
@@ -107,6 +109,8 @@ export function save() {
     dmChannels: state.dmChannels,
     settings: state.settings,
     blocked: state.blocked,
+    saved: state.saved.slice(0, 300),
+    audit: state.audit,
     ui: { activeServerId: state.ui.activeServerId, activeChannelId: state.ui.activeChannelId, lastChannelByServer: state.ui.lastChannelByServer },
     savedAt: Date.now(),
   };
@@ -149,6 +153,8 @@ export function load() {
   state.reads = saved.reads || {};
   state.dmChannels = saved.dmChannels || {};
   state.blocked = saved.blocked || {};
+  state.saved = Array.isArray(saved.saved) ? saved.saved : [];
+  state.audit = saved.audit && typeof saved.audit === 'object' ? saved.audit : {};
   state.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
   state.self.plan = isPlanId(state.settings.plan) ? state.settings.plan : DEFAULT_PLAN;
   state.users = saved.users || {};
@@ -170,6 +176,7 @@ export function load() {
     s.isPublic = s.visibility === 'public';
     s.members = s.members && typeof s.members === 'object' ? s.members : {};
     if (s.ownerId === state.self.id && s.members[state.self.id]) s.members[state.self.id].role = 'owner';
+    s.threadIds = (s.threadIds || []).filter((id) => state.channels[id]?.type === 'thread' && state.channels[id]?.serverId === s.id);
   }
   const savedServer = saved.ui?.activeServerId;
   state.ui.activeServerId = savedServer === '@me' ? '@me' : (state.servers[savedServer] ? savedServer : null);
@@ -394,7 +401,12 @@ export function setMemberRole(serverId, userId, role) {
   const user = state.users[userId];
   const member = existing || ensureMember(server, { id: userId, displayName: user?.displayName || 'Member', handle: user?.handle || 'member' });
   if (!member) return { ok: false, error: 'That person is not in this server.' };
+  const was = existing?.role || 'member';
   member.role = role;
+  recordAudit(serverId, 'member.role', {
+    detail: `${member.displayName || user?.displayName || 'Member'} is now ${roleRecord(role)?.label || role}`,
+    target: `was ${was}`,
+  });
   persistNow();
   bus.emit('members:changed', serverId);
   bus.emit('server:sync', server);
@@ -761,6 +773,7 @@ export function updateServer(id, patch) {
     s.visibility = s.isPublic ? 'public' : 'invite';
   }
   if (patch.notify != null) s.notify = ['all', 'mentions', 'none'].includes(patch.notify) ? patch.notify : s.notify;
+  recordAudit(id, 'server.update', { detail: `Saved changes to ${s.name}` });
   persistNow();
   bus.emit('servers:changed');
   bus.emit('server:updated', s);
@@ -847,6 +860,11 @@ export function setServerVisibility(serverId, visibility) {
     oldKey = s.networkKey;
     s.networkKey = privateNetworkKey();
   }
+  recordAudit(serverId, 'server.visibility', {
+    detail: wanted === 'invite'
+      ? 'Server is now invite-only — old links stop working'
+      : 'Server is now listed in Explore',
+  });
   persistNow();
   bus.emit('servers:changed');
   bus.emit('server:updated', s);
@@ -869,6 +887,7 @@ export function rotateInviteLink(serverId) {
   s.networkKey = isListed(s) ? networkKeyFor(s.name) : privateNetworkKey();
   if (isListed(s)) return { ok: false, error: 'Public servers are joined by name; make it invite-only first.' };
   s.inviteRotatedAt = Date.now();
+  recordAudit(serverId, 'server.rekey', { detail: 'Issued a new invite link — the old one stopped working' });
   persistNow();
   bus.emit('servers:changed');
   bus.emit('server:updated', s);
@@ -908,8 +927,10 @@ export function createChannel(serverId, name, topic = '', { category = '', type 
   const ch = createChannelRecord(serverId, r.value, String(topic).slice(0, 140));
   ch.category = String(category || '').slice(0, 24);
   ch.type = type === 'announcement' ? 'announcement' : 'text';
+  ch.slowmode = 0;
   state.channels[ch.id] = ch;
   s.channelIds.push(ch.id);
+  recordAudit(serverId, 'channel.create', { detail: `#${ch.name}` });
   persistNow();
   bus.emit('channels:changed', serverId);
   bus.emit('servers:changed');
@@ -931,6 +952,15 @@ export function updateChannel(channelId, patch) {
   if (patch.topic != null) ch.topic = String(patch.topic).slice(0, 140);
   if (patch.category != null) ch.category = String(patch.category).slice(0, 24);
   if (patch.type != null) ch.type = patch.type === 'announcement' ? 'announcement' : 'text';
+  if (patch.slowmode != null) {
+    const secs = Number(patch.slowmode);
+    if (!SLOWMODE_CHOICES.includes(secs)) return { ok: false, error: 'Pick a slowmode from the list.' };
+    ch.slowmode = secs;
+    recordAudit(ch.serverId, 'channel.slowmode', {
+      detail: secs ? `#${ch.name} — one message every ${secs}s` : `#${ch.name} — slowmode off`,
+    });
+  }
+  recordAudit(ch.serverId, 'channel.update', { detail: `#${ch.name}` });
   persistNow();
   bus.emit('channels:changed', ch.serverId);
   bus.emit('channel:updated', ch);
@@ -951,6 +981,15 @@ export function deleteChannel(channelId) {
   delete state.channels[channelId];
   delete state.messages[channelId];
   delete state.reads[channelId];
+  for (const tid of [...(s.threadIds || [])]) {
+    if (state.channels[tid]?.parentChannelId === channelId) {
+      s.threadIds = s.threadIds.filter((id) => id !== tid);
+      delete state.channels[tid];
+      delete state.messages[tid];
+      delete state.reads[tid];
+    }
+  }
+  recordAudit(ch.serverId, 'channel.delete', { detail: `#${ch.name}` });
   if (state.ui.activeChannelId === channelId) selectChannel(remaining[0]);
   persistNow();
   bus.emit('channels:changed', ch.serverId);
@@ -1043,6 +1082,255 @@ export function dmPeer(channelId) {
   return state.users[ch.dmUserId] || state.peers[ch.dmUserId]?.user || { id: ch.dmUserId, displayName: ch.name, handle: ch.handle };
 }
 
+/* --------------------------------- threads -------------------------------- */
+
+/**
+ * Threads are ordinary channels with `type: 'thread'`, kept out of the sidebar
+ * list and pointed at the message they grew out of. That means the composer,
+ * the relay, unread counts, reactions, pins and moderation all work in a thread
+ * without a second implementation.
+ */
+
+export function threadParent(thread) {
+  if (!thread || thread.type !== 'thread') return null;
+  return state.channels[thread.parentChannelId] || null;
+}
+
+export function threadsForChannel(channelId) {
+  const ch = state.channels[channelId];
+  if (!ch) return [];
+  const ids = ch.serverId ? (state.servers[ch.serverId]?.threadIds || []) : [];
+  return ids
+    .map((id) => state.channels[id])
+    .filter((t) => t && t.type === 'thread' && t.parentChannelId === channelId)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export function threadsForServer(serverId) {
+  const srv = state.servers[serverId];
+  if (!srv) return [];
+  return (srv.threadIds || []).map((id) => state.channels[id]).filter(Boolean);
+}
+
+export function threadReplyCount(threadId) {
+  const ch = state.channels[threadId];
+  if (!ch || ch.type !== 'thread') return 0;
+  return (state.messages[threadId] || []).filter((m) => !m.system).length;
+}
+
+export function threadForMessage(channelId, messageId) {
+  const ch = state.channels[channelId];
+  if (!ch?.serverId) return null;
+  return threadsForChannel(channelId).find((t) => t.parentMessageId === messageId) || null;
+}
+
+export function createThread({ channelId, messageId = null, name = '' } = {}) {
+  const ch = state.channels[channelId];
+  if (!ch) return { ok: false, error: 'That channel is gone.' };
+  if (ch.type === 'dm') return { ok: false, error: 'Direct messages do not have threads.' };
+  if (ch.type === 'thread') return { ok: false, error: 'Threads cannot have threads.' };
+  if (!canPostInChannel(channelId)) {
+    return { ok: false, error: ch.type === 'announcement' ? 'Only staff can start threads here.' : 'Your role is read-only here.' };
+  }
+  const parent = messageId ? (state.messages[channelId] || []).find((m) => m.id === messageId) : null;
+  if (messageId && !parent) return { ok: false, error: 'That message is gone.' };
+  const existing = messageId ? threadForMessage(channelId, messageId) : null;
+  if (existing) return { ok: true, thread: existing, existing: true };
+
+  const label = String(name || (parent ? parent.text : '')).replace(/\s+/g, ' ').trim().slice(0, 60) || 'Thread';
+  const server = state.servers[ch.serverId];
+  if (!server) return { ok: false, error: 'Server not found.' };
+  const cap = limitsFor(currentPlan().id).channels;
+  if ((server.threadIds || []).length >= cap * 2) {
+    return { ok: false, error: 'This server has a lot of threads already. Archive a few first.', planLimit: true };
+  }
+  const thread = {
+    id: `th_${randId(10)}`,
+    serverId: ch.serverId,
+    name: label,
+    type: 'thread',
+    parentChannelId: ch.id,
+    parentMessageId: parent ? parent.id : null,
+    parentPreview: parent ? { displayName: parent.displayName, text: String(parent.text || '').slice(0, 140) } : null,
+    threadOwnerId: state.self?.id || null,
+    createdAt: Date.now(),
+    position: channelSeq++,
+  };
+  state.channels[thread.id] = thread;
+  state.messages[thread.id] = [];
+  server.threadIds = server.threadIds || [];
+  server.threadIds.push(thread.id);
+  if (parent) parent.threadId = thread.id;
+  recordAudit(ch.serverId, 'thread.create', { detail: label });
+  persist();
+  bus.emit('threads:changed', { serverId: ch.serverId, channelId: ch.id });
+  bus.emit('channels:changed', ch.serverId);
+  return { ok: true, thread };
+}
+
+/** A thread that arrived over the wire, so a remote device sees the same room. */
+export function ensureThreadChannel({ serverId, id, parentChannelId, parentMessageId = null, name = 'Thread', ownerId = null }) {
+  const server = state.servers[serverId];
+  if (!server || !/^th_[a-z0-9]{4,20}$/i.test(String(id || ''))) return null;
+  if (state.channels[id]) return state.channels[id];
+  const parent = state.channels[parentChannelId] || null;
+  const thread = {
+    id,
+    serverId,
+    name: String(name || 'Thread').slice(0, 60),
+    type: 'thread',
+    parentChannelId: parent ? parent.id : null,
+    parentMessageId,
+    threadOwnerId: ownerId,
+    createdAt: Date.now(),
+    position: channelSeq++,
+    isRemote: true,
+  };
+  state.channels[id] = thread;
+  state.messages[id] = state.messages[id] || [];
+  server.threadIds = server.threadIds || [];
+  if (!server.threadIds.includes(id)) server.threadIds.push(id);
+  persist();
+  bus.emit('threads:changed', { serverId, channelId: thread.parentChannelId });
+  bus.emit('channels:changed', serverId);
+  return thread;
+}
+
+export function deleteThread(threadId) {
+  const thread = state.channels[threadId];
+  if (!thread || thread.type !== 'thread') return { ok: false, error: 'Thread not found.' };
+  if (!canManageChannel(threadId)) return ownershipError('channel');
+  const server = state.servers[thread.serverId];
+  if (server) server.threadIds = (server.threadIds || []).filter((id) => id !== threadId);
+  const parentMsg = thread.parentMessageId
+    ? (state.messages[thread.parentChannelId] || []).find((m) => m.id === thread.parentMessageId)
+    : null;
+  if (parentMsg) delete parentMsg.threadId;
+  delete state.channels[threadId];
+  delete state.messages[threadId];
+  delete state.reads[threadId];
+  if (state.ui.activeChannelId === threadId) selectChannel(thread.parentChannelId || server?.defaultChannelId);
+  recordAudit(thread.serverId, 'thread.delete', { detail: thread.name });
+  persistNow();
+  bus.emit('threads:changed', { serverId: thread.serverId, channelId: thread.parentChannelId });
+  bus.emit('channels:changed', thread.serverId);
+  return { ok: true };
+}
+
+/* --------------------------------- slowmode ------------------------------- */
+
+export const SLOWMODE_CHOICES = [0, 5, 10, 30, 60, 300];
+
+/** Threads inherit their parent channel's slowmode. */
+export function slowmodeFor(channelId) {
+  const ch = state.channels[channelId];
+  if (!ch || ch.type === 'dm') return 0;
+  if (ch.type === 'thread') return Number(state.channels[ch.parentChannelId]?.slowmode || 0);
+  return Number(ch.slowmode || 0);
+}
+
+/** Seconds I still have to wait before posting here (0 = go ahead). */
+export function slowmodeRemaining(channelId) {
+  const wait = slowmodeFor(channelId);
+  if (!wait || !state.self) return 0;
+  if (canModerateChannel(channelId)) return 0;
+  const mine = (state.messages[channelId] || [])
+    .filter((m) => m.userId === state.self.id && !m.system && !m.pending)
+    .map((m) => m.ts)
+    .sort((a, b) => b - a)[0];
+  if (!mine) return 0;
+  const left = Math.ceil(wait - (Date.now() - mine) / 1000);
+  return left > 0 ? left : 0;
+}
+
+/* -------------------------------- audit log ------------------------------- */
+
+const AUDIT_LIMIT = 200;
+
+/** Newest-first list of the things staff did in this server. */
+export function auditLog(serverId, limit = AUDIT_LIMIT) {
+  return (state.audit[serverId] || []).slice(0, limit);
+}
+
+export function recordAudit(serverId, action, { detail = '', target = '', actor = null } = {}) {
+  if (!serverId || !state.servers[serverId]) return null;
+  const who = actor || state.self || {};
+  const entry = {
+    id: `au_${randId(8)}`,
+    ts: Date.now(),
+    action,
+    actorId: who.id || null,
+    actorName: who.displayName || 'Someone',
+    actorHandle: who.handle || '',
+    detail: String(detail || '').slice(0, 140),
+    target: String(target || '').slice(0, 80),
+  };
+  state.audit[serverId] = [entry, ...(state.audit[serverId] || [])].slice(0, AUDIT_LIMIT);
+  bus.emit('audit:changed', { serverId });
+  return entry;
+}
+
+/* ----------------------------- saved messages ---------------------------- */
+
+const SAVED_LIMIT = 300;
+
+export function isSaved(msgId) {
+  return (state.saved || []).some((x) => x.msgId === msgId);
+}
+
+export function savedList() {
+  return state.saved || [];
+}
+
+/** Bookmark a message. Bookmarks are local to you and follow your account. */
+export function toggleSaved(msgOrId) {
+  const msg = typeof msgOrId === 'string' ? findMessage(msgOrId) : msgOrId;
+  if (!msg?.id) return { ok: false, error: 'That message is gone.' };
+  if (msg.system) return { ok: false, error: 'System notices cannot be saved.' };
+  const at = (state.saved || []).findIndex((x) => x.msgId === msg.id);
+  if (at >= 0) {
+    state.saved.splice(at, 1);
+    persist();
+    bus.emit('saved:changed', { msgId: msg.id, saved: false });
+    return { ok: true, saved: false };
+  }
+  const ch = state.channels[msg.channelId] || {};
+  const server = ch.serverId ? state.servers[ch.serverId] : null;
+  state.saved.unshift({
+    msgId: msg.id,
+    channelId: msg.channelId,
+    channelName: ch.name || '',
+    channelType: ch.type || 'text',
+    serverId: ch.serverId || null,
+    serverName: server?.name || '',
+    authorName: msg.displayName || 'Unknown',
+    authorId: msg.userId || null,
+    text: String(msg.text || '').slice(0, 500),
+    ts: msg.ts,
+    savedAt: Date.now(),
+  });
+  state.saved = state.saved.slice(0, SAVED_LIMIT);
+  persist();
+  bus.emit('saved:changed', { msgId: msg.id, saved: true });
+  return { ok: true, saved: true };
+}
+
+export function removeSaved(msgId) {
+  const before = state.saved.length;
+  state.saved = (state.saved || []).filter((x) => x.msgId !== msgId);
+  if (state.saved.length !== before) {
+    persist();
+    bus.emit('saved:changed', { msgId, saved: false });
+  }
+}
+
+/** Jump to the channel a saved message lives in (the message may be gone). */
+export function savedTarget(entry) {
+  const ch = state.channels[entry.channelId];
+  if (!ch) return null;
+  return ch;
+}
+
 /* -------------------------------- messages ------------------------------- */
 
 let msgSeq = 0;
@@ -1085,6 +1373,12 @@ export function sendMessage(channelId, text, { replyTo = null } = {}) {
   if (!ch || !state.self) return null;
   if (!canPostInChannel(channelId)) {
     toast(ch.type === 'announcement' ? 'Only staff can post in an announcement channel.' : 'Your role in this server is read-only.', 'warn');
+    return null;
+  }
+  const waitLeft = slowmodeRemaining(channelId);
+  if (waitLeft > 0) {
+    toast(`Slowmode: wait ${waitLeft}s before posting again.`, 'warn');
+    bus.emit('slowmode:blocked', { channelId, remaining: waitLeft });
     return null;
   }
   const body = String(text || '').replace(/\s+$/, '');
@@ -1165,6 +1459,12 @@ export function deleteMessage(channelId, msgId, { broadcast = true, remote = fal
       return;
     }
   }
+  if (!remote && list[i].userId !== state.self?.id) {
+    recordAudit(state.channels[channelId]?.serverId, 'message.delete', {
+      detail: `Removed a message from ${list[i].displayName}`,
+      target: String(list[i].text || '').slice(0, 80),
+    });
+  }
   list.splice(i, 1);
   rememberTombstone(channelId, msgId);
   persist();
@@ -1244,20 +1544,40 @@ export function logEntriesFor(channelId, limit = LOG_MAX) {
 }
 
 /** Apply a channel history digest from another device or from the relay. */
-export function mergeRemoteEntries({ key, channel, entries = [], removed = [] }) {
+export function mergeRemoteEntries({ key, channel, entries = [], removed = [], thread = null }) {
   const server = Object.values(state.servers).find((s) => s.networkKey === key);
   if (!server) return { ok: false, reason: 'no-server' };
-  const name = String(channel || 'general').toLowerCase();
-  let ch = server.channelIds.map((id) => state.channels[id]).find((c) => c && c.name === name);
-  if (!ch) {
-    // a channel that exists on the server owner's side but not here yet
-    if (server.ownerId === state.self?.id) return { ok: false, reason: 'looking-at-my-own-server' };
-    const created = createChannelRecord(server.id, name, '');
-    if (!created) return { ok: false, reason: 'bad-name' };
-    state.channels[created.id] = created;
-    server.channelIds.push(created.id);
-    ch = created;
-    bus.emit('channels:changed', server.id);
+  const rawChannel = String(channel || 'general');
+  let ch = null;
+  if (rawChannel.startsWith('thread-')) {
+    // Thread history rides the same retained log, under its own channel id.
+    const tid = rawChannel.slice('thread-'.length);
+    ch = state.channels[tid] || null;
+    if (!ch && thread && server.ownerId !== state.self?.id) {
+      const parentName = String(thread.parentChannel || '').toLowerCase();
+      const parent = server.channelIds.map((id) => state.channels[id]).find((c) => c && c.name === parentName);
+      ch = ensureThreadChannel({
+        serverId: server.id,
+        id: tid,
+        parentChannelId: parent?.id || null,
+        parentMessageId: thread.parentMessageId || null,
+        name: thread.name || 'Thread',
+      });
+    }
+    if (!ch) return { ok: false, reason: 'no-thread' };
+  } else {
+    const name = rawChannel.toLowerCase();
+    ch = server.channelIds.map((id) => state.channels[id]).find((c) => c && c.name === name);
+    if (!ch) {
+      // a channel that exists on the server owner's side but not here yet
+      if (server.ownerId === state.self?.id) return { ok: false, reason: 'looking-at-my-own-server' };
+      const created = createChannelRecord(server.id, name, '');
+      if (!created) return { ok: false, reason: 'bad-name' };
+      state.channels[created.id] = created;
+      server.channelIds.push(created.id);
+      ch = created;
+      bus.emit('channels:changed', server.id);
+    }
   }
   const list = state.messages[ch.id] || (state.messages[ch.id] = []);
   const ids = new Set(list.map((m) => m.id));
@@ -1759,6 +2079,8 @@ export function snapshotState() {
     settings: { ...state.settings },
     // copies, not references: a snapshot must not change when the app moves on
     blocked: JSON.parse(JSON.stringify(state.blocked || {})),
+    saved: JSON.parse(JSON.stringify(state.saved || [])),
+    audit: JSON.parse(JSON.stringify(state.audit || {})),
     ui: {
       activeServerId: state.ui.activeServerId,
       activeChannelId: state.ui.activeChannelId,
@@ -1780,6 +2102,8 @@ export function applySnapshot(snap, { replaceLocal = true } = {}) {
   state.reads = snap.reads || {};
   state.dmChannels = snap.dmChannels || {};
   state.blocked = snap.blocked || {};
+  state.saved = Array.isArray(snap.saved) ? snap.saved : [];
+  state.audit = snap.audit && typeof snap.audit === 'object' ? snap.audit : {};
   state.settings = { ...DEFAULT_SETTINGS, ...(snap.settings || {}) };
   state.self.plan = isPlanId(state.settings.plan) ? state.settings.plan : DEFAULT_PLAN;
 
@@ -1798,6 +2122,7 @@ export function applySnapshot(snap, { replaceLocal = true } = {}) {
     srv.isPublic = srv.visibility === 'public';
     srv.members = srv.members && typeof srv.members === 'object' ? srv.members : {};
     if (srv.ownerId === state.self.id && srv.members[state.self.id]) srv.members[state.self.id].role = 'owner';
+    srv.threadIds = (srv.threadIds || []).filter((id) => state.channels[id]?.type === 'thread' && state.channels[id]?.serverId === srv.id);
   }
   if (!state.ui || !state.ui.activeServerId) {
     state.ui.activeServerId = snap.ui?.activeServerId && state.servers[snap.ui.activeServerId] ? snap.ui.activeServerId : Object.keys(state.servers)[0] || '@me';

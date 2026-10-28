@@ -24,6 +24,17 @@ be guessed from its name. Only your invite link (`?invite=…`) works, and **Rot
 while everyone already inside follows automatically. Plainly stated in the app: invite-only means
 unlisted and link-gated, not end-to-end encrypted — the relay is still shared infrastructure.
 
+**Threads.** Every message can grow a side conversation. Reply in a thread and the conversation
+stays out of the channel — with its own replies, reactions, unread badge and history. Threads appear
+nested under their channel in the sidebar, carry their own retained log so a new device sees them, and
+inherit the channel's slowmode and permissions.
+
+**Slowmode, audit log and saved messages.** Slowmode limits how often one person can post (a live
+countdown sits under the composer; staff are exempt). Every staff action — channel changes, role
+changes, deleted messages, invite rotations — is written to a per-server **audit log** you can read in
+server settings. Any message can be bookmarked; saved messages live in **Settings → Saved messages**
+with a jump straight back to the conversation.
+
 **Real-time, for real.** Every browser that has the page open joins the same room on public relay
 infrastructure (MQTT over WebSocket, with extra brokers and a plain WebSocket relay as fallbacks).
 Messages, reactions, edits, deletes, typing indicators and presence all arrive instantly on
@@ -174,7 +185,7 @@ assets/js/
   main.js                  bootstrap, network wiring, notifications, routing, shortcuts
   store.js                 state, persistence, all mutations
   net.js                   transport pool (MQTT / WebSocket / BroadcastChannel), outbox, digests
-  shared.js                retained history digests + server cards (cross-device sync)
+  shared.js                retained history digests + server cards + thread logs (cross-device sync)
   perms.js                 roles and capabilities (pure, unit-tested)
   plans.js                 Free / Plus / Studio definitions and limits
   account.js               password hashing, handles, encrypted vault key
@@ -185,7 +196,8 @@ assets/js/
   avatar.js                avatars, image processing, server icons
   sim.js                   clearly-labelled demo members (opt-in)
   ui/                      modal, menu, popover, toast, emoji picker, profile card, lightbox
-  views/                   onboarding, shell, messages, composer, modals
+  views/                   onboarding, shell, messages (threads, reactions), composer, modals
+docs/voice-plan.md         the voice-channel scope: architecture, phases, costs, limits
 tools/
   serve.mjs                zero-dependency static dev server
   relay/server.mjs         self-hostable relay (MQTT over WS + broadcast WS)

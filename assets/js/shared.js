@@ -56,6 +56,24 @@ function channelDigest(channelId) {
   const entries = logEntriesFor(channelId, limit);
   const removed = tombstonesFor(channelId);
   if (!entries.length && !removed.length) return null;
+  // Threads keep their own log, keyed by id so a thread can never collide with
+  // a channel of the same name. The parent's name travels with it so a device
+  // that has never seen the thread can still place it in the right channel.
+  if (channel.type === 'thread') {
+    const parent = state.channels[channel.parentChannelId];
+    return {
+      key: server.networkKey,
+      channel: `thread-${channel.id}`,
+      entries,
+      removed,
+      thread: {
+        id: channel.id,
+        name: channel.name,
+        parentChannel: parent?.name || '',
+        parentMessageId: channel.parentMessageId || null,
+      },
+    };
+  }
   return {
     key: server.networkKey,
     channel: channel.name,
@@ -137,7 +155,7 @@ function applyLogPacket(p) {
     rememberPending(p);
     return;
   }
-  const result = mergeRemoteEntries({ key: p.key, channel: p.channel, entries: p.entries || [], removed: p.removed || [] });
+  const result = mergeRemoteEntries({ key: p.key, channel: p.channel, entries: p.entries || [], removed: p.removed || [], thread: p.thread || null });
   if (result?.ok && result.added) bus.emit('history:arrived', { channelId: result.channelId, added: result.added });
 }
 
@@ -167,7 +185,7 @@ export function applyPendingForServer(serverKey) {
   let applied = 0;
   for (const [id, p] of [...pendingLogs]) {
     if (p.key !== serverKey) continue;
-    const res = mergeRemoteEntries({ key: p.key, channel: p.channel, entries: p.entries || [], removed: p.removed || [] });
+    const res = mergeRemoteEntries({ key: p.key, channel: p.channel, entries: p.entries || [], removed: p.removed || [], thread: p.thread || null });
     if (res?.ok) { applied += res.added; pendingLogs.delete(id); }
   }
   const card = cards.get(serverKey);
@@ -182,7 +200,7 @@ export function flushPending() {
     for (const [id, p] of [...pendingLogs]) {
       const server = Object.values(state.servers).find((s) => s.networkKey === p.key);
       if (!server) continue;
-      const res = mergeRemoteEntries({ key: p.key, channel: p.channel, entries: p.entries || [], removed: p.removed || [] });
+      const res = mergeRemoteEntries({ key: p.key, channel: p.channel, entries: p.entries || [], removed: p.removed || [], thread: p.thread || null });
       if (res?.ok) pendingLogs.delete(id);
     }
     for (const card of cards.values()) ingestServerCard(card);

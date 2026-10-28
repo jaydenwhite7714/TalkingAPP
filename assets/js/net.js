@@ -528,7 +528,7 @@ export const net = {
     else bus.emit('net:tick');
   },
 
-  sendChat({ channelKey, channel, serverKey, serverName, serverTopic, channels, message, replyTo }) {
+  sendChat({ channelKey, channel, serverKey, serverName, serverTopic, channels, message, replyTo, thread = null }) {
     const att = message.attachment
       ? { kind: message.attachment.kind, name: message.attachment.name, width: message.attachment.width, height: message.attachment.height, size: message.attachment.bytes || message.attachment.src?.length || 0 }
       : null;
@@ -544,6 +544,7 @@ export const net = {
       att,
       msgTs: message.ts,
       replyTo: replyTo ? { name: replyTo.displayName, text: replyTo.text.slice(0, 120) } : null,
+      ...(thread ? { thread } : {}),
     });
   },
 
@@ -609,7 +610,7 @@ export const net = {
    * Retained frames are replayed to anyone who connects later, so a brand-new
    * device sees the conversation without needing another person online.
    */
-  publishChannelLog({ key, channel, entries, removed, savedAt }) {
+  publishChannelLog({ key, channel, entries, removed, thread = null, savedAt }) {
     if (!key || !channel) return 0;
     const body = this.packRetained({
       kind: 'log',
@@ -617,6 +618,7 @@ export const net = {
       channel,
       entries,
       removed,
+      ...(thread ? { thread } : {}),
       savedAt: savedAt || Date.now(),
     });
     return this.sendSystemRetained(`log/${key}/${channel}`, body);
@@ -704,8 +706,8 @@ export const net = {
     return this.publish({ kind: 'sync', key: serverKey }, { noDedupe: true });
   },
 
-  sendHistory({ serverKey, channel, entries, to }) {
-    return this.publish({ kind: 'history', key: serverKey, channel, entries, to }, { noDedupe: true });
+  sendHistory({ serverKey, channel, entries, to, thread = null }) {
+    return this.publish({ kind: 'history', key: serverKey, channel, entries, to, ...(thread ? { thread } : {}) }, { noDedupe: true });
   },
 
   sendTyping({ serverKey, channel }) {

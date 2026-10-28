@@ -9,7 +9,8 @@ import {
   flush, persistNow, networkKeyFor, activeChannel, canManageServer,
   memberList, setMemberRole, currentPlan, setPlan, canAssignRolesIn, forgetServer,
   isServerOwner, roleOf, setServerNotify, blockedList, unblockUser, inviteLinkFor,
-  setServerVisibility, rotateInviteLink, isListed,
+  setServerVisibility, rotateInviteLink, isListed, auditLog, savedList, toggleSaved,
+  slowmodeRemaining, threadParent, threadReplyCount, deleteThread, SLOWMODE_CHOICES,
 } from '../store.js';
 import { PLANS, DEMO_NOTE, planOf, planBadgeHTML, limitsFor } from '../plans.js';
 import { roleChipHTML, assignableRoles, roleRecord } from '../perms.js';
@@ -168,6 +169,12 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
       e.currentTarget.setAttribute('aria-checked', String(on));
     },
   });
+  const slowSelect = el('select', { class: 'input', id: 'chSlowmode' });
+  const slowLabels = { 0: 'Off — everyone can talk freely', 5: '5 seconds', 10: '10 seconds', 30: '30 seconds', 60: '1 minute', 300: '5 minutes' };
+  for (const secs of SLOWMODE_CHOICES) {
+    slowSelect.append(el('option', { value: String(secs), text: slowLabels[secs] || `${secs} seconds` }));
+  }
+  slowSelect.value = String(existing?.slowmode || 0);
   const err = el('div', { class: 'form-error', hidden: true });
   const preview = el('div', { class: 'row', style: { gap: '7px', color: 'var(--text-2)', fontSize: '14px', padding: '8px 0 2px' } });
   const updatePreview = () => {
@@ -192,6 +199,10 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
     el('div', { class: 'form-group' },
       el('label', { class: 'form-label', text: 'Category' }), categoryInput,
       el('div', { class: 'form-help', text: 'Channels in the same category are grouped together in the sidebar.' })),
+    el('div', { class: 'form-group' },
+      el('label', { class: 'form-label', text: 'Slowmode' }),
+      slowSelect,
+      el('div', { class: 'form-help', text: 'Limits how often one person can post. Moderators and staff are exempt.' })),
     el('div', { class: 'setting-row', style: { borderTop: '1px solid var(--border)' } },
       el('div', { class: 'sr-text' },
         el('div', { class: 'sr-title', text: 'Announcement channel' }),
@@ -212,14 +223,16 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
     el('button', {
       class: 'btn btn-primary', type: 'button', onclick: () => {
         const type = announceSwitch.getAttribute('aria-checked') === 'true' ? 'announcement' : 'text';
+        const slowmode = Number(slowSelect.value || 0);
         const res = isEdit
-          ? updateChannel(existing.id, { name: nameInput.value, topic: topicInput.value, category: categoryInput.value, type })
+          ? updateChannel(existing.id, { name: nameInput.value, topic: topicInput.value, category: categoryInput.value, type, slowmode })
           : createChannel(server.id, nameInput.value, topicInput.value, { category: categoryInput.value, type });
         if (!res.ok) {
           err.hidden = false;
           err.textContent = res.error || 'Could not save that channel.';
           return;
         }
+        if (!isEdit && slowmode) updateChannel(res.channel.id, { slowmode });
         ref.close();
         toast(isEdit ? 'Channel updated' : `#${res.channel.name} created`, 'ok');
         if (!isEdit) goToChannel(res.channel.id);
@@ -356,6 +369,101 @@ export function openInvite(server) {
   );
 
   const ref = openModal({ title: 'Invite people', subtitle: server ? `Grow ${server.name}` : 'Bring someone into the conversation', content, footer, icon: 'userPlus' });
+}
+
+/** Readable, newest-first list of what staff did in a server. */
+function auditList(server) {
+  const wrap = el('div', { class: 'audit-list' });
+  const entries = auditLog(server.id);
+  if (!entries.length) {
+    wrap.append(el('div', { class: 'members-empty', text: 'Nothing yet. Channel changes, role changes, deleted messages and invite links show up here.' }));
+    return wrap;
+  }
+  const iconFor = (action) => {
+    if (action.startsWith('message')) return 'trash';
+    if (action.startsWith('member')) return 'users';
+    if (action.startsWith('server.rekey')) return 'link';
+    if (action.startsWith('server')) return 'settings';
+    if (action.startsWith('thread')) return 'thread';
+    return 'hash';
+  };
+  for (const entry of entries) {
+    wrap.append(el('div', { class: 'audit-row' },
+      el('span', { class: 'audit-ico', html: iconHTML(iconFor(entry.action), 14) }),
+      el('div', { class: 'audit-body' },
+        el('div', { class: 'audit-line' },
+          el('b', { text: entry.actorName }),
+          el('span', { text: ` ${actionLabel(entry.action)}` }),
+          entry.detail ? el('span', { class: 'audit-detail', text: ` — ${entry.detail}` }) : null),
+        el('div', { class: 'audit-meta', text: formatRelative(entry.ts) })),
+    ));
+  }
+  return wrap;
+}
+
+function actionLabel(action) {
+  const map = {
+    'channel.create': 'created a channel',
+    'channel.update': 'changed a channel',
+    'channel.delete': 'deleted a channel',
+    'channel.slowmode': 'changed slowmode',
+    'server.update': 'edited the server',
+    'server.visibility': 'changed who can join',
+    'server.rekey': 'rotated the invite link',
+    'member.role': 'changed a role',
+    'message.delete': 'removed a message',
+    'thread.create': 'started a thread',
+    'thread.delete': 'deleted a thread',
+  };
+  return map[action] || 'made a change';
+}
+
+/* --------------------------- saved messages ----------------------------- */
+
+function savedTab() {
+  const wrap = el('div', {});
+  const list = el('div', { class: 'saved-list' });
+  const render = () => {
+    list.replaceChildren();
+    const items = savedList();
+    if (!items.length) {
+      list.append(el('div', { class: 'members-empty', text: 'Nothing saved yet. Hover a message and press the bookmark, or use “Save message” in its menu.' }));
+      return;
+    }
+    for (const item of items) {
+      const where = item.channelType === 'thread'
+        ? `${item.serverName || 'Thread'} › ${item.channelName}`
+        : item.serverName ? `${item.serverName} › #${item.channelName}` : `Direct message with ${item.authorName}`;
+      const row = el('div', { class: 'saved-row' },
+        el('div', { class: 'saved-main' },
+          el('div', { class: 'saved-meta' },
+            el('b', { text: item.authorName }),
+            el('span', { text: ` · ${where} · ${formatRelative(item.savedAt)}` })),
+          el('div', { class: 'saved-text', text: item.text || '(picture or attachment)' })),
+      );
+      const jump = el('button', { class: 'btn btn-sm btn-secondary', type: 'button' }, icon('chevronRight', 13), 'Open');
+      jump.addEventListener('click', () => {
+        const ch = state.channels[item.channelId];
+        if (!ch) { toast('That conversation is gone.', 'warn'); return; }
+        closeSettings();
+        closeAllModals();
+        goToChannel(ch.id);
+      });
+      const drop = el('button', {
+        class: 'icon-btn', type: 'button', 'aria-label': 'Remove from saved', title: 'Remove from saved',
+        onclick: () => { toggleSaved(item.msgId); render(); },
+      }, icon('trash', 15));
+      row.append(el('div', { class: 'row', style: { gap: '6px' } }, jump, drop));
+      list.append(row);
+    }
+  };
+  render();
+  const row = el('div', { class: 'settings-block' },
+    el('div', { class: 'sr-title', text: 'Saved messages' }),
+    el('div', { class: 'sr-desc', style: { marginBottom: '12px' }, text: 'Bookmarks are yours alone. They travel with your account when you move devices.' }),
+    list);
+  wrap.append(row);
+  return wrap;
 }
 
 /* ============================= server settings ========================== */
@@ -522,6 +630,10 @@ export function openServerSettings(server) {
       el('div', { class: 'sr-title', text: `People & roles — ${memberList(server).length}` }),
       el('div', { class: 'sr-desc', style: { marginBottom: '10px' }, text: 'Roles decide who can change things. Only the owner can hand out Admin.' }),
       people),
+    el('div', { class: 'setting-block' },
+      el('div', { class: 'sr-title', text: 'Audit log' }),
+      el('div', { class: 'sr-desc', style: { marginBottom: '10px' }, text: 'Everything staff did here — newest first. It follows the server between devices.' }),
+      auditList(server)),
     el('div', { class: 'setting-row' },
       el('div', { class: 'sr-text' },
         el('div', { class: 'sr-title', text: 'Network key' }),
@@ -938,6 +1050,7 @@ const NAV = [
   { id: 'backup', label: 'Backup & sync', icon: 'uploadCloud' },
   { id: 'profile', label: 'Profile', icon: 'edit' },
   { id: 'plans', label: 'Plans', icon: 'sparkle' },
+  { id: 'saved', label: 'Saved messages', icon: 'bookmark' },
   { id: 'blocked', label: 'Blocked users', icon: 'shield' },
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'notifications', label: 'Notifications', icon: 'bell' },
@@ -947,6 +1060,14 @@ const NAV = [
 ];
 
 let openSettingsRef = null;
+
+/** Close the settings modal from anywhere (saved messages jump to a channel). */
+export function closeSettings() {
+  if (openSettingsRef) {
+    openSettingsRef.close();
+    openSettingsRef = null;
+  }
+}
 
 export function openSettings(tab = MODAL_TAB.lastSettingsTab || 'account') {
   if (openSettingsRef) { openSettingsRef.close(); openSettingsRef = null; }
@@ -980,6 +1101,7 @@ export function openSettings(tab = MODAL_TAB.lastSettingsTab || 'account') {
     else if (id === 'backup') content.append(backupTab());
     else if (id === 'profile') content.append(profileTab());
     else if (id === 'plans') content.append(plansTab());
+    else if (id === 'saved') content.append(savedTab());
     else if (id === 'blocked') content.append(blockedTab());
     else if (id === 'appearance') content.append(appearanceTab());
     else if (id === 'notifications') content.append(notificationsTab());
@@ -1625,6 +1747,8 @@ function aboutTab() {
     el('div', { class: 'setting-block' },
       el('div', { class: 'sr-title', text: "What's new in this build" }),
       el('ul', { class: 'bullets' },
+        el('li', { text: 'Threads: reply in a side conversation that keeps its own history, reactions and unread badge, and stays out of the channel.' }),
+        el('li', { text: 'Slowmode, an audit log of staff actions, and bookmarks (Settings → Saved messages).' }),
         el('li', { text: 'Blocking works: blocked people are hidden everywhere, stop sending you sounds and badges, and unblocking restores the history.' }),
         el('li', { text: 'Invite-only servers: unlisted, with a random key instead of one you could guess from the name. Rotate the link to lock out anyone who has the old one.' }),
         el('li', { text: 'Message rules are enforced in the data layer: only the author can edit, and only the author or a moderator can delete or pin.' }),
