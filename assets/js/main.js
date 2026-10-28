@@ -6,8 +6,9 @@ import {
   activeChannel, openDM, ensureDMChannelForUser, applyRemoteReaction, findMessage, editMessage,
   deleteMessage, networkKeyFor, addMessage, setMessageAttachment,
   touchMember, canModerateChannel, canPostInChannel, currentPlan,
+  isBlocked, joinByInvite, isListed, joinNetworkCommunity,
 } from './store.js';
-import { initShared, flushPending, applyPendingForServer, cardFor, publishAllNow } from './shared.js';
+import { initShared, flushPending, applyPendingForServer, cardFor, publishAllNow, sendCardTo } from './shared.js';
 import { defaultAvatar, ensureWireAvatar } from './avatar.js';
 import { readAccount, writeAccount, readClaims, claimHandle, isClaimedLocally } from './account.js';
 import { showLock, startNetworkForLock, setUnlockHandler } from './views/lock.js';
@@ -181,15 +182,17 @@ async function handleInviteLink() {
   const existing = Object.values(state.servers).find((s) => s.networkKey === invite.key);
   if (existing) {
     setTimeout(() => goToServer(existing.id), 700);
+    stripInviteParams();
     return;
   }
-  const { joinNetworkCommunity } = await import('./store.js');
-  const res = joinNetworkCommunity({
-    name: invite.name.replace(/-/g, ' '),
-    key: invite.key,
-    channels: ['general'],
-    card: cardFor(invite.key),
-  });
+  const res = invite.private
+    ? joinByInvite({ key: invite.key, name: invite.name, card: cardFor(invite.key) })
+    : joinNetworkCommunity({
+      name: invite.name.replace(/-/g, ' '),
+      key: invite.key,
+      channels: ['general'],
+      card: cardFor(invite.key),
+    });
   if (res.ok) {
     const recovered = applyPendingForServer(invite.key);
     setTimeout(() => {
@@ -197,10 +200,17 @@ async function handleInviteLink() {
       toast(`You joined ${res.server.name}${recovered ? ` — ${recovered} message${recovered === 1 ? '' : 's'} of history` : ''}`, 'party', { duration: 3200 });
       net.requestHistory({ serverKey: invite.key });
     }, 900);
+  } else {
+    toast(res.error || 'That invite could not be used.', 'error', { duration: 6000 });
   }
+  stripInviteParams();
+}
+
+function stripInviteParams() {
   // keep the URL clean so a refresh doesn't re-trigger the join
   const url = new URL(location.href);
   url.searchParams.delete('join');
+  url.searchParams.delete('invite');
   url.searchParams.delete('name');
   try { window.history.replaceState(null, '', url.pathname + url.search + location.hash); } catch {}
 }
@@ -342,6 +352,13 @@ function wireEvents() {
     if (state.settings.simulated) simulateReply(channelId, state.messages[channelId]?.at(-1)?.text || '');
   });
 
+  bus.on('server:rekey', ({ oldKey, nextKey, serverId }) => {
+    net.sendRekey({ oldKey, nextKey, serverId });
+    toast('New invite link created — old links no longer work.', 'ok', { duration: 4200 });
+  });
+  bus.on('server:rekeyed', ({ server }) => {
+    toast(`${server?.name || 'A server'} moved to a new invite link.`, 'info', { duration: 3000 });
+  });
   bus.on('servers:changed', refreshCommunities);
   bus.on('server:updated', refreshCommunities);
   bus.on('channels:changed', refreshCommunities);
@@ -487,6 +504,8 @@ function wireEvents() {
     if (!p.key) return;
     const server = Object.values(state.servers).find((s) => s.networkKey === p.key);
     if (!server) return;
+    // a private server never publishes its card, so hand it to the newcomer
+    if (!isListed(server) && p.from?.id) sendCardTo(p.from.id, server);
     const entriesFor = (ch) => (state.messages[ch.id] || [])
       .filter((m) => !m.system && !m.queued)
       .slice(-20)
@@ -564,7 +583,7 @@ function wireEvents() {
     // An edit is only honoured from the person who wrote the message, or from
     // the owner of the server it lives in. Nobody else can rewrite history.
     if (!mayRewrite(m, p)) return;
-    editMessage(m.channelId, m.id, p.text, { broadcast: false });
+    editMessage(m.channelId, m.id, p.text, { broadcast: false, remote: true });
   });
 
   bus.on('net:delete', (p) => {
@@ -576,7 +595,7 @@ function wireEvents() {
     const m = findMessage(p.msgId, ch.id);
     if (!m) return;
     if (!mayRewrite(m, p)) return;
-    deleteMessage(ch.id, p.msgId, { broadcast: false });
+    deleteMessage(ch.id, p.msgId, { broadcast: false, remote: true });
   });
 
   bus.on('net:status', ({ status, transports, peers }) => {
@@ -768,6 +787,7 @@ function promptJoin(p) {
 
 function notifyIncoming(ch, msg) {
   if (!msg || msg.isSelf) return;
+  if (msg.userId && isBlocked(msg.userId)) return;
   const server = ch.serverId ? state.servers[ch.serverId] : null;
   const level = ch.type === 'dm' ? 'all' : (server?.notify || 'all');
   const isActive = ch.id === state.ui.activeChannelId && !document.hidden;

@@ -12,6 +12,18 @@ talk to everyone on the site in real time — no backend to run, no installs.
 
 ## What it does
 
+**Blocking that actually blocks.** Block someone from their profile card or from a message they sent:
+their messages vanish from every channel and DM, their DMs stop counting as unread, their sounds and
+pop-ups stop, and the composer offers an unblock button instead of a text box. Nothing is deleted —
+unblocking brings the whole conversation back. The list lives in **Settings → Blocked users** and
+travels with your account.
+
+**Invite-only servers.** Tick *Invite-only* when creating a server (or flip it in server settings) and
+it disappears from Explore, stops advertising itself to the network, and gets a random key that cannot
+be guessed from its name. Only your invite link (`?invite=…`) works, and **Rotate** issues a new link
+while everyone already inside follows automatically. Plainly stated in the app: invite-only means
+unlisted and link-gated, not end-to-end encrypted — the relay is still shared infrastructure.
+
 **Real-time, for real.** Every browser that has the page open joins the same room on public relay
 infrastructure (MQTT over WebSocket, with extra brokers and a plain WebSocket relay as fallbacks).
 Messages, reactions, edits, deletes, typing indicators and presence all arrive instantly on
@@ -30,7 +42,8 @@ messages and pictures are the last things dropped. A plain JSON backup file is o
 
 **Roles that actually stop people.** Owner, admin, moderator, member and read-only. Capabilities are
 checked in the store before any mutation, in the UI, and again when a change arrives from the
-network: only the author or the server owner can rewrite or delete a message remotely. Servers you
+network. Only the author may edit a message, only the author or a moderator may delete or pin one,
+and a remote edit or delete is refused unless it comes from the author or the server owner. Servers you
 did not create are read-only for you, announcement channels are staff-only, and a server card
 published by someone else can never rename a server you own.
 

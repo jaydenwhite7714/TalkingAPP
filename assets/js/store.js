@@ -166,6 +166,8 @@ export function load() {
     s.networkKey = s.networkKey || networkKeyFor(s.name);
     s.notify = ['all', 'mentions', 'none'].includes(s.notify) ? s.notify : 'all';
     s.inviteCode = s.inviteCode || `inv_${randId(9)}`;
+    s.visibility = s.visibility === 'invite' || s.isPublic === false ? 'invite' : 'public';
+    s.isPublic = s.visibility === 'public';
     s.members = s.members && typeof s.members === 'object' ? s.members : {};
     if (s.ownerId === state.self.id && s.members[state.self.id]) s.members[state.self.id].role = 'owner';
   }
@@ -399,6 +401,33 @@ export function setMemberRole(serverId, userId, role) {
   return { ok: true, member, role: roleRecord(role) };
 }
 
+/**
+ * Is this server meant to be discoverable?
+ *   public — listed in Explore, advertised to everyone online
+ *   invite — unlisted, reachable only with a link that carries its secret key
+ */
+export function isListed(server) {
+  if (!server) return false;
+  if (server.visibility === 'invite') return false;
+  return server.isPublic !== false;
+}
+
+export function serverVisibility(server) {
+  return isListed(server) ? 'public' : 'invite';
+}
+
+/** Secret key for a private server: not derivable from its name. */
+export function privateNetworkKey() {
+  return `p_${randId(20)}`;
+}
+
+export function inviteLinkFor(server) {
+  if (!server) return location.origin + location.pathname;
+  const base = `${location.origin}${location.pathname}`;
+  const param = isListed(server) ? 'join' : 'invite';
+  return `${base}?${param}=${encodeURIComponent(server.networkKey)}&name=${encodeURIComponent(server.name)}`;
+}
+
 function ownershipError(what = 'server') {
   return { ok: false, error: `Only the owner can change this ${what}.` };
 }
@@ -546,7 +575,7 @@ export function getServer(id) {
   return state.servers[id] || null;
 }
 
-export function createServer({ name, desc = '', color = null, emoji = '💬', isPublic = true, channels = ['general'] }) {
+export function createServer({ name, desc = '', color = null, emoji = '💬', isPublic = true, visibility = null, channels = ['general'] }) {
   const r = validateServerName(name);
   if (!r.ok) return { ok: false, error: r.error };
   const owned = Object.values(state.servers).filter((srv) => srv.ownerId === state.self.id).length;
@@ -558,15 +587,18 @@ export function createServer({ name, desc = '', color = null, emoji = '💬', is
       planLimit: true,
     };
   }
+  const listed = visibility ? visibility === 'public' : Boolean(isPublic);
   const server = {
     id: `s_${randId(10)}`,
     name: r.value,
     desc: String(desc).slice(0, 180),
     color: color || AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)],
     emoji: emoji || null,
-    networkKey: networkKeyFor(r.value),
+    // A private server's key is random, so nobody can join by guessing its name.
+    networkKey: listed ? networkKeyFor(r.value) : privateNetworkKey(),
     ownerId: state.self.id,
-    isPublic: Boolean(isPublic),
+    isPublic: listed,
+    visibility: listed ? 'public' : 'invite',
     createdAt: Date.now(),
     channelIds: [],
     defaultChannelId: null,
@@ -597,13 +629,58 @@ export function createServer({ name, desc = '', color = null, emoji = '💬', is
   if (server.members[state.self.id]) server.members[state.self.id].role = 'owner';
   seedNewServerGreeting(server);
 
-  if (isPublic) registerNetworkCommunity(server);
+  if (isListed(server)) registerNetworkCommunity(server);
 
   persistNow();
   bus.emit('servers:changed');
   bus.emit('network:changed');
   bus.emit('server:created', server);
   selectServer(server.id, { channelId: server.channelIds[0], force: true });
+  return { ok: true, server };
+}
+
+/**
+ * Join a server from an invite link. The link carries the server's secret key,
+ * so this works even when nobody from that server is online.
+ */
+export function joinByInvite({ key, name = '', card = null }) {
+  const clean = String(key || '').trim();
+  if (!/^[a-z0-9_-]{4,48}$/i.test(clean)) return { ok: false, error: 'That invite link looks broken.' };
+  const existing = Object.values(state.servers).find((s) => s.networkKey === clean);
+  if (existing) return { ok: true, server: existing, existing: true };
+  const r = validateServerName(card?.name || name || 'Invited server');
+  const server = {
+    id: `s_${randId(10)}`,
+    name: r.ok ? r.value : 'Invited server',
+    desc: String(card?.desc || 'An invite-only server.').slice(0, 180),
+    color: card?.color || colorFromString(clean, 55),
+    emoji: card?.emoji ?? null,
+    networkKey: clean,
+    ownerId: card?.ownerId || null,
+    ownerName: card?.ownerName || null,
+    isPublic: false,
+    visibility: 'invite',
+    isRemote: true,
+    createdAt: Date.now(),
+    channelIds: [],
+    defaultChannelId: null,
+    members: 1,
+    roles: {},
+    memberRole: 'member',
+    notify: 'all',
+    categories: [],
+  };
+  const ch = createChannelRecord(server.id, 'general', '');
+  state.channels[ch.id] = ch;
+  server.channelIds.push(ch.id);
+  server.defaultChannelId = ch.id;
+  state.servers[server.id] = server;
+  ensureMember(server, state.self);
+  seedNewServerGreeting(server);
+  if (card) ingestServerCard(card);
+  persistNow();
+  bus.emit('servers:changed');
+  selectServer(server.id, { channelId: ch.id, force: true });
   return { ok: true, server };
 }
 
@@ -679,7 +756,10 @@ export function updateServer(id, patch) {
   if (patch.desc != null) s.desc = String(patch.desc).slice(0, 180);
   if (patch.color != null) s.color = patch.color;
   if (patch.emoji !== undefined) s.emoji = patch.emoji;
-  if (patch.isPublic != null) s.isPublic = Boolean(patch.isPublic);
+  if (patch.isPublic != null) {
+    s.isPublic = Boolean(patch.isPublic);
+    s.visibility = s.isPublic ? 'public' : 'invite';
+  }
   if (patch.notify != null) s.notify = ['all', 'mentions', 'none'].includes(patch.notify) ? patch.notify : s.notify;
   persistNow();
   bus.emit('servers:changed');
@@ -747,6 +827,67 @@ export function leaveServer(id) {
   if (!s) return;
   forgetServer(id);
   toast(`You left ${s.name}`, 'info');
+}
+
+/** Listed or invite-only. Only someone who can manage invites may change it. */
+export function setServerVisibility(serverId, visibility) {
+  const s = state.servers[serverId];
+  if (!s) return { ok: false, error: 'Server not found.' };
+  if (!can(s, state.self?.id, CAP.manageInvites)) {
+    return { ok: false, error: 'Only the owner or an admin can change who can join.' };
+  }
+  const wanted = visibility === 'invite' ? 'invite' : 'public';
+  if (wanted === serverVisibility(s)) return { ok: true, server: s, visibility: wanted, unchanged: true };
+  s.visibility = wanted;
+  s.isPublic = wanted === 'public';
+  // A server that becomes private gets a fresh, unguessable key so the name no
+  // longer gives it away. Existing members keep talking: we migrate them first.
+  let oldKey = null;
+  if (wanted === 'invite') {
+    oldKey = s.networkKey;
+    s.networkKey = privateNetworkKey();
+  }
+  persistNow();
+  bus.emit('servers:changed');
+  bus.emit('server:updated', s);
+  if (oldKey) bus.emit('server:rekey', { server: s, oldKey, nextKey: s.networkKey });
+  else bus.emit('server:sync', s);
+  return { ok: true, server: s, visibility: wanted, oldKey };
+}
+
+/**
+ * Rotate the invite link: everyone already inside follows to a new secret key,
+ * while the old link stops working for anybody else.
+ */
+export function rotateInviteLink(serverId) {
+  const s = state.servers[serverId];
+  if (!s) return { ok: false, error: 'Server not found.' };
+  if (!can(s, state.self?.id, CAP.manageInvites)) {
+    return { ok: false, error: 'Only the owner or an admin can rotate the invite link.' };
+  }
+  const oldKey = s.networkKey;
+  s.networkKey = isListed(s) ? networkKeyFor(s.name) : privateNetworkKey();
+  if (isListed(s)) return { ok: false, error: 'Public servers are joined by name; make it invite-only first.' };
+  s.inviteRotatedAt = Date.now();
+  persistNow();
+  bus.emit('servers:changed');
+  bus.emit('server:updated', s);
+  bus.emit('server:rekey', { server: s, oldKey, nextKey: s.networkKey });
+  return { ok: true, server: s, oldKey, nextKey: s.networkKey };
+}
+
+/** Apply a rekey sent by another member, so the whole room moves together. */
+export function applyRekey({ oldKey, nextKey }) {
+  if (!oldKey || !nextKey || oldKey === nextKey) return { ok: false };
+  const s = Object.values(state.servers).find((srv) => srv.networkKey === oldKey);
+  if (!s) return { ok: false, reason: 'unknown-key' };
+  s.networkKey = nextKey;
+  s.visibility = 'invite';
+  s.isPublic = false;
+  persistNow();
+  bus.emit('servers:changed');
+  bus.emit('server:updated', s);
+  return { ok: true, server: s };
 }
 
 /* -------------------------------- channels ------------------------------- */
@@ -826,6 +967,80 @@ export function reorderChannels(serverId, orderedIds) {
   s.channelIds = [...valid, ...extra];
   persistNow();
   bus.emit('channels:changed', serverId);
+}
+
+/* -------------------------------- blocking ------------------------------- */
+
+/** Have I blocked this person? Blocked people are filtered out everywhere. */
+export function isBlocked(userId) {
+  return Boolean(userId && state.blocked && state.blocked[userId]);
+}
+
+export function blockedList() {
+  return Object.values(state.blocked || {})
+    .map((b) => ({ ...b, id: b.id || b.userId }))
+    .filter((b) => b.id)
+    .sort((a, b) => (b.at || 0) - (a.at || 0));
+}
+
+/** Messages from people you blocked are kept, hidden, and come back on unblock. */
+export function isHiddenMessage(msg) {
+  if (!msg) return false;
+  if (msg.system || msg.userId === 'talkingapp') return false;
+  return isBlocked(msg.userId);
+}
+
+/** The message list a channel should actually show. */
+export function visibleMessages(channelId) {
+  return (state.messages[channelId] || []).filter((m) => !isHiddenMessage(m));
+}
+
+export function blockUser(userId, info = {}) {
+  if (!state.self) return { ok: false, error: 'Sign in first.' };
+  if (!userId) return { ok: false, error: 'Nobody to block.' };
+  if (userId === state.self.id) return { ok: false, error: 'You cannot block yourself.' };
+  const known = (info.displayName ? info : null) || state.users[userId] || state.peers[userId]?.user || {};
+  const existing = state.blocked[userId];
+  state.blocked[userId] = {
+    id: userId,
+    name: known.displayName || existing?.name || 'Blocked user',
+    handle: known.handle || existing?.handle || 'unknown',
+    at: existing?.at || Date.now(),
+  };
+  // a blocked conversation stops counting as unread and stops showing typing
+  const dmId = state.dmChannels[userId];
+  if (dmId) state.reads[dmId] = Date.now();
+  for (const [cid, map] of Object.entries(state.typing)) {
+    if (map[userId]) {
+      delete map[userId];
+      bus.emit('typing:changed', cid);
+    }
+  }
+  persistNow();
+  bus.emit('blocked:changed', { userId, blocked: true });
+  bus.emit('messages:filtered', { userId });
+  bus.emit('presence:changed');
+  return { ok: true, blocked: state.blocked[userId] };
+}
+
+export function unblockUser(userId) {
+  if (!state.blocked?.[userId]) return { ok: false, error: 'That person is not blocked.' };
+  delete state.blocked[userId];
+  persistNow();
+  bus.emit('blocked:changed', { userId, blocked: false });
+  bus.emit('messages:filtered', { userId });
+  return { ok: true };
+}
+
+export function toggleBlockUser(userId, info = {}) {
+  return isBlocked(userId) ? unblockUser(userId) : blockUser(userId, info);
+}
+
+/** The other person in a direct message channel, if it is one. */
+export function dmPeer(channelId) {
+  const ch = state.channels[channelId];
+  if (!ch || ch.type !== 'dm' || !ch.dmUserId) return null;
+  return state.users[ch.dmUserId] || state.peers[ch.dmUserId]?.user || { id: ch.dmUserId, displayName: ch.name, handle: ch.handle };
 }
 
 /* -------------------------------- messages ------------------------------- */
@@ -909,9 +1124,15 @@ export function findMessage(msgId, channelId = null) {
   return null;
 }
 
-export function editMessage(channelId, msgId, text, { broadcast = true } = {}) {
+export function editMessage(channelId, msgId, text, { broadcast = true, remote = false } = {}) {
   const m = state.messages[channelId]?.find((x) => x.id === msgId);
   if (!m) return null;
+  // Only the author may rewrite a message. `remote` means the network layer
+  // already checked that the author (or the server owner) sent the change.
+  if (!remote && m.userId !== state.self?.id) {
+    toast('You can only edit your own messages.', 'warn');
+    return null;
+  }
   m.text = String(text).slice(0, 2000);
   m.editedTs = Date.now();
   persist();
@@ -932,11 +1153,18 @@ function rememberTombstone(channelId, msgId) {
   tombstones.set(channelId, list.slice(-50));
 }
 
-export function deleteMessage(channelId, msgId, { broadcast = true } = {}) {
+export function deleteMessage(channelId, msgId, { broadcast = true, remote = false } = {}) {
   const list = state.messages[channelId];
   if (!list) return;
   const i = list.findIndex((m) => m.id === msgId);
   if (i === -1) return;
+  if (!remote) {
+    const mine = list[i].userId === state.self?.id;
+    if (!mine && !canModerateChannel(channelId)) {
+      toast('Only the author or a moderator can delete that message.', 'warn');
+      return;
+    }
+  }
   list.splice(i, 1);
   rememberTombstone(channelId, msgId);
   persist();
@@ -974,6 +1202,11 @@ export function applyRemoteReaction({ channelId, msgId, emoji, op, userId }) {
 export function togglePin(channelId, msgId) {
   const m = state.messages[channelId]?.find((x) => x.id === msgId);
   if (!m) return;
+  const mine = m.userId === state.self?.id;
+  if (!mine && !canModerateChannel(channelId)) {
+    toast('Only the author or a moderator can pin here.', 'warn');
+    return;
+  }
   m.pinned = !m.pinned;
   persist();
   bus.emit('message:updated', { channelId, message: m });
@@ -1110,6 +1343,8 @@ export function ingestServerCard(card) {
   if (card.color && card.color !== server.color) { server.color = card.color; changed = true; }
   if (!server.ownerId && card.ownerId) { server.ownerId = card.ownerId; changed = true; }
   if (card.ownerName && card.ownerName !== server.ownerName) { server.ownerName = card.ownerName; changed = true; }
+  // A card can never flip a server's discoverability. Only its owner decides that.
+  if (server.visibility === 'invite') server.isPublic = false;
   if (Array.isArray(card.channels) && card.channels.length) {
     for (const def of card.channels) {
       const name = String(def?.name || '').toLowerCase();
@@ -1198,7 +1433,7 @@ export function markRead(channelId) {
 
 export function unreadCount(channelId) {
   const read = state.reads[channelId] || 0;
-  return (state.messages[channelId] || []).filter((m) => m.ts > read && !m.isSelf && !m.system).length;
+  return (state.messages[channelId] || []).filter((m) => m.ts > read && !m.isSelf && !m.system && !isHiddenMessage(m)).length;
 }
 
 export function mentionCount(channelId) {
@@ -1206,7 +1441,8 @@ export function mentionCount(channelId) {
   const read = state.reads[channelId] || 0;
   const handle = state.self.handle;
   return (state.messages[channelId] || []).filter(
-    (m) => m.ts > read && !m.isSelf && (new RegExp(`@${handle}\\b`, 'i').test(m.text) || /@everyone\b/i.test(m.text)),
+    (m) => m.ts > read && !m.isSelf && !isHiddenMessage(m)
+      && (new RegExp(`@${handle}\\b`, 'i').test(m.text) || /@everyone\b/i.test(m.text)),
   ).length;
 }
 
@@ -1214,7 +1450,7 @@ export function unreadEverywhere() {
   let total = 0;
   for (const [cid, list] of Object.entries(state.messages)) {
     const read = state.reads[cid] || 0;
-    total += list.filter((m) => m.ts > read && !m.isSelf && !m.system).length;
+    total += list.filter((m) => m.ts > read && !m.isSelf && !m.system && !isHiddenMessage(m)).length;
   }
   return total;
 }
@@ -1282,7 +1518,7 @@ export function registerNetworkCommunity(server) {
 
 export function registerAllCommunities() {
   for (const s of Object.values(state.servers)) {
-    if (s.isPublic) registerNetworkCommunity(s);
+    if (isListed(s)) registerNetworkCommunity(s);
   }
 }
 
@@ -1479,7 +1715,7 @@ export function searchAll(query) {
     if (!state.channels[cid]) continue;
     for (let i = list.length - 1; i >= 0 && messages.length < 40; i--) {
       const m = list[i];
-      if (m.text.toLowerCase().includes(q)) messages.push({ ...m, channelId: cid });
+      if (m.text.toLowerCase().includes(q) && !isHiddenMessage(m)) messages.push({ ...m, channelId: cid });
     }
   }
   messages.sort((a, b) => b.ts - a.ts);
@@ -1518,11 +1754,16 @@ export function snapshotState() {
     servers: state.servers,
     channels: state.channels,
     messages,
-    reads: state.reads,
-    dmChannels: state.dmChannels,
-    settings: state.settings,
-    blocked: state.blocked,
-    ui: { activeServerId: state.ui.activeServerId, activeChannelId: state.ui.activeChannelId, lastChannelByServer: state.ui.lastChannelByServer },
+    reads: { ...state.reads },
+    dmChannels: { ...state.dmChannels },
+    settings: { ...state.settings },
+    // copies, not references: a snapshot must not change when the app moves on
+    blocked: JSON.parse(JSON.stringify(state.blocked || {})),
+    ui: {
+      activeServerId: state.ui.activeServerId,
+      activeChannelId: state.ui.activeChannelId,
+      lastChannelByServer: { ...state.ui.lastChannelByServer },
+    },
     savedAt: Date.now(),
   };
 }
@@ -1553,6 +1794,8 @@ export function applySnapshot(snap, { replaceLocal = true } = {}) {
     srv.networkKey = srv.networkKey || networkKeyFor(srv.name);
     srv.notify = ['all', 'mentions', 'none'].includes(srv.notify) ? srv.notify : 'all';
     srv.inviteCode = srv.inviteCode || `inv_${randId(9)}`;
+    srv.visibility = srv.visibility === 'invite' || srv.isPublic === false ? 'invite' : 'public';
+    srv.isPublic = srv.visibility === 'public';
     srv.members = srv.members && typeof srv.members === 'object' ? srv.members : {};
     if (srv.ownerId === state.self.id && srv.members[state.self.id]) srv.members[state.self.id].role = 'owner';
   }

@@ -5,7 +5,7 @@ import { avatarHTML, serverIconHTML, defaultAvatar } from '../avatar.js';
 import {
   state, selectServer, selectChannel, dmList, unreadCount, mentionCount, markRead,
   pinnedMessages, openDM, toast, setSetting, firstServerId, canManageServer,
-  memberList, roleOf, setServerNotify, canModerateChannel,
+  memberList, roleOf, setServerNotify, canModerateChannel, isBlocked, toggleBlockUser,
 } from '../store.js';
 import { roleChipHTML, roleRecord } from '../perms.js';
 import { planBadgeHTML, planForUser } from '../plans.js';
@@ -374,13 +374,14 @@ function renderDMSidebar() {
     frag.append(el('div', { class: 'dm-header' }, el('span', { class: 'grow', text: 'Direct messages' }), el('span', { class: 'pill', text: String(dms.length) })));
     for (const c of dms) {
       const user = state.users[c.dmUserId] || state.peers[c.dmUserId]?.user || { id: c.dmUserId, displayName: c.name, handle: c.handle };
-      const last = state.messages[c.id]?.at(-1);
-      const unread = unreadCount(c.id);
+      const blockedPeer = isBlocked(c.dmUserId);
+      const last = visibleMessagesOf(c.id).at(-1);
+      const unread = blockedPeer ? 0 : unreadCount(c.id);
       const mentions = mentionCount(c.id);
       const active = state.ui.activeChannelId === c.id;
       const presence = state.presence[c.dmUserId] || (c.dmUserId === state.self?.id ? 'online' : 'offline');
       const item = el('div', {
-        class: `dm-item${active ? ' is-active' : ''}${unread ? ' unread' : ''}`,
+        class: `dm-item${active ? ' is-active' : ''}${unread ? ' unread' : ''}${blockedPeer ? ' is-blocked' : ''}`,
         role: 'link',
         tabindex: '0',
         onclick: () => goToChannel(c.id),
@@ -403,8 +404,10 @@ function renderDMSidebar() {
       const holder = el('span', { html: avatarHTML(user, { size: 32, status: presence, showStatus: true }) });
       item.append(holder.firstElementChild || holder);
       item.append(el('div', { class: 'dm-meta' },
-        el('div', { class: 'dm-name' }, el('span', { class: 'truncate', text: user.displayName || c.name })),
-        el('div', { class: 'dm-preview', text: last ? `${last.isSelf ? 'You: ' : ''}${previewText(last)}` : 'No messages yet' }),
+        el('div', { class: 'dm-name' },
+          el('span', { class: 'truncate', text: user.displayName || c.name }),
+          blockedPeer ? el('span', { class: 'blocked-chip', html: `${iconHTML('lock', 10)}<span>blocked</span>` }) : null),
+        el('div', { class: 'dm-preview', text: blockedPeer ? 'You blocked this person — messages are hidden' : last ? `${last.isSelf ? 'You: ' : ''}${previewText(last)}` : 'No messages yet' }),
       ));
       if (unread) item.append(el('span', { class: 'badge', text: String(mentions || unread) }));
       frag.append(item);
@@ -431,6 +434,13 @@ function renderDMSidebar() {
       icon('compass', 15), 'Explore the network'),
   ));
   return frag;
+}
+
+function visibleMessagesOf(channelId) {
+  return (state.messages[channelId] || []).filter((m) => {
+    if (m.system) return true;
+    return !isBlocked(m.userId);
+  });
 }
 
 function previewText(m) {

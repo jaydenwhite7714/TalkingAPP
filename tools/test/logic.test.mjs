@@ -263,6 +263,186 @@ await t.test('shared module is wired and exposes the caches', () => {
   if (packed.length > 96000) throw new Error(`digest not trimmed: ${packed.length}`);
 });
 
+
+/* ------------------------- blocking actually blocks ---------------------- */
+
+const room = Object.values(store.state.servers).find((s) => s.name === 'Digest Room');
+const roomCh = room.channelIds.map((id) => store.state.channels[id]).find((c) => c.name === 'general');
+store.addMessage(roomCh.id, store.makeMessage({
+  channelId: roomCh.id, userId: 'u_spam', displayName: 'Spammer', handle: 'spam',
+  text: 'buy my thing', ts: Date.now(), network: true,
+}));
+
+await t.test('blocking hides their messages and unread count', () => {
+  const before = store.visibleMessages(roomCh.id).length;
+  if (!store.visibleMessages(roomCh.id).some((m) => m.text === 'buy my thing')) throw new Error('message should be visible first');
+  const res = store.blockUser('u_spam', { displayName: 'Spammer', handle: 'spam' });
+  if (!res.ok) throw new Error(res.error);
+  const after = store.visibleMessages(roomCh.id);
+  if (after.length !== before - 1) throw new Error(`expected one hidden message, ${before} → ${after.length}`);
+  if (after.some((m) => m.userId === 'u_spam')) throw new Error('blocked message still listed');
+  if (store.unreadCount(roomCh.id) !== 0) throw new Error('blocked messages still counted as unread');
+});
+
+await t.test('the messages are kept, so unblocking brings them back', () => {
+  if (!(store.state.messages[roomCh.id] || []).some((m) => m.userId === 'u_spam')) throw new Error('blocking deleted the history');
+  store.unblockUser('u_spam');
+  if (!store.visibleMessages(roomCh.id).some((m) => m.text === 'buy my thing')) throw new Error('unblocking did not restore the message');
+});
+
+await t.test('blocking yourself, or nobody, is refused', () => {
+  if (store.blockUser(store.state.self.id).ok) throw new Error('blocked myself');
+  if (store.blockUser(null).ok) throw new Error('blocked nobody');
+});
+
+await t.test('the blocked list is saved with everything else', () => {
+  store.blockUser('u_spam', { displayName: 'Spammer', handle: 'spam' });
+  const snap = store.snapshotState();
+  if (!snap.blocked?.u_spam) throw new Error('block missing from the snapshot');
+  if (!store.blockedList().some((b) => b.id === 'u_spam')) throw new Error('blockedList is empty');
+  store.unblockUser('u_spam');
+  if (snap.blocked.u_spam === undefined) throw new Error('snapshot was mutated');
+});
+
+/* --------------------- permissions cannot be bypassed -------------------- */
+
+await t.test('only the author may edit a message', () => {
+  const server = Object.values(store.state.servers).find((s) => s.name === 'Digest Room');
+  const ch = server.channelIds.map((id) => store.state.channels[id])[0];
+  const theirs = store.makeMessage({ channelId: ch.id, userId: 'u_someone', displayName: 'Someone', handle: 'someone', text: 'original', network: true });
+  store.addMessage(ch.id, theirs);
+  const res = store.editMessage(ch.id, theirs.id, 'tampered');
+  if (res) throw new Error('edited somebody else\'s message');
+  const stored = store.state.messages[ch.id].find((m) => m.id === theirs.id);
+  if (stored.text !== 'original') throw new Error('the text changed anyway');
+});
+
+/** A server I am only a plain member of, so moderation rules really apply. */
+function foreignChannel() {
+  const joined = store.joinByInvite({ key: 'p_foreignmembers1', name: 'Foreign Room', card: {
+    key: 'p_foreignmembers1', name: 'Foreign Room', ownerId: 'u_owner', ownerName: 'Owner',
+    savedAt: Date.now(), channels: [{ name: 'general', type: 'text' }],
+    members: [{ id: 'u_owner', role: 'owner', name: 'Owner', handle: 'owner' }],
+  } });
+  if (!joined.ok) throw new Error(joined.error);
+  const ch = joined.server.channelIds.map((id) => store.state.channels[id])[0];
+  return { server: joined.server, ch };
+}
+
+await t.test('a plain member cannot delete somebody else\'s message', () => {
+  const { ch } = foreignChannel();
+  const theirs = store.makeMessage({ channelId: ch.id, userId: 'u_stranger', displayName: 'Stranger', handle: 'stranger', text: 'keep me', network: true });
+  store.addMessage(ch.id, theirs);
+  store.deleteMessage(ch.id, theirs.id);
+  if (!store.state.messages[ch.id].some((m) => m.id === theirs.id)) throw new Error('a plain member deleted it');
+  // the network layer already checked the sender, so its deletes go through
+  store.deleteMessage(ch.id, theirs.id, { remote: true });
+  if (store.state.messages[ch.id].some((m) => m.id === theirs.id)) throw new Error('a checked remote delete was refused');
+});
+
+await t.test('a member can delete their own message', () => {
+  const { ch } = foreignChannel();
+  const mine = store.makeMessage({ channelId: ch.id, userId: store.state.self.id, displayName: 'Me', handle: 'me', text: 'mine', isSelf: true });
+  store.addMessage(ch.id, mine);
+  store.deleteMessage(ch.id, mine.id);
+  if (store.state.messages[ch.id].some((m) => m.id === mine.id)) throw new Error('could not delete my own message');
+});
+
+await t.test('pinning needs to be the author or a moderator', () => {
+  const { ch } = foreignChannel();
+  const theirs = store.makeMessage({ channelId: ch.id, userId: 'u_stranger', displayName: 'Stranger', handle: 'stranger', text: 'pin me', network: true });
+  store.addMessage(ch.id, theirs);
+  store.togglePin(ch.id, theirs.id);
+  const stored = store.state.messages[ch.id].find((m) => m.id === theirs.id);
+  if (stored.pinned) throw new Error('a member pinned somebody else\'s message');
+  const mine = store.makeMessage({ channelId: ch.id, userId: store.state.self.id, displayName: 'Me', handle: 'me', text: 'mine', isSelf: true });
+  store.addMessage(ch.id, mine);
+  if (!store.togglePin(ch.id, mine.id)) throw new Error('could not pin my own message');
+});
+
+/* ------------------- invite-only servers are really private -------------- */
+
+await t.test('an invite-only server gets a random key, a public one gets its name', () => {
+  const open = store.createServer({ name: 'Open House', channels: ['general'] });
+  const priv = store.createServer({ name: 'Secret Lair', visibility: 'invite', channels: ['general'] });
+  if (!open.ok || !priv.ok) throw new Error(open.error || priv.error);
+  if (open.server.networkKey !== 'open-house') throw new Error(`public key is ${open.server.networkKey}`);
+  if (priv.server.networkKey.includes('secret')) throw new Error(`private key leaks the name: ${priv.server.networkKey}`);
+  if (!/^p_[a-z0-9]{10,}$/i.test(priv.server.networkKey)) throw new Error(`unexpected private key ${priv.server.networkKey}`);
+  if (store.isListed(priv.server)) throw new Error('private server counts as listed');
+  if (!store.isListed(open.server)) throw new Error('public server is not listed');
+});
+
+await t.test('private servers stay out of Explore', () => {
+  const priv = Object.values(store.state.servers).find((s) => s.name === 'Secret Lair');
+  if (store.state.network[priv.networkKey]) throw new Error('private server registered itself for discovery');
+});
+
+await t.test('a private server publishes neither history nor a card', async () => {
+  const priv = Object.values(store.state.servers).find((s) => s.name === 'Secret Lair');
+  const ch = priv.channelIds.map((id) => store.state.channels[id])[0];
+  store.addMessage(ch.id, store.makeMessage({ channelId: ch.id, userId: store.state.self.id, displayName: 'Me', handle: 'me', text: 'secret plans', isSelf: true }));
+
+  const seen = [];
+  const realLog = net.publishChannelLog;
+  const realCard = net.publishServerCard;
+  net.publishChannelLog = (d) => { seen.push(['log', d.key]); return 1; };
+  net.publishServerCard = (c) => { seen.push(['card', c.key]); return 1; };
+
+  shared.publishChannelLogNow(ch.id);
+  shared.scheduleServerCard(priv);
+  await new Promise((r) => setTimeout(r, 1800));
+
+  net.publishChannelLog = realLog;
+  net.publishServerCard = realCard;
+
+  if (seen.some(([kind, key]) => key === priv.networkKey)) {
+    throw new Error(`private server leaked: ${JSON.stringify(seen)}`);
+  }
+  // ...while a public server still does publish
+  const open = Object.values(store.state.servers).find((s) => s.name === 'Open House');
+  const openCh = open.channelIds.map((id) => store.state.channels[id])[0];
+  store.addMessage(openCh.id, store.makeMessage({ channelId: openCh.id, userId: store.state.self.id, displayName: 'Me', handle: 'me', text: 'hello world', isSelf: true }));
+  net.publishChannelLog = (d) => { seen.push(['log', d.key]); return 1; };
+  shared.publishChannelLogNow(openCh.id);
+  net.publishChannelLog = realLog;
+  if (!seen.some(([kind, key]) => kind === 'log' && key === open.networkKey)) throw new Error('public history stopped publishing');
+});
+
+await t.test('rotating the link locks out the old one and existing members follow', () => {
+  const priv = Object.values(store.state.servers).find((s) => s.name === 'Secret Lair');
+  const oldKey = priv.networkKey;
+  const res = store.rotateInviteLink(priv.id);
+  if (!res.ok) throw new Error(res.error);
+  if (res.nextKey === oldKey) throw new Error('key did not change');
+  // another member still holding the old key gets moved over
+  const member = store.joinByInvite({ key: oldKey, name: 'Secret Lair' });
+  if (!member.ok) throw new Error(member.error);
+  const applied = store.applyRekey({ oldKey, nextKey: res.nextKey });
+  if (!applied.ok) throw new Error('member did not follow the rekey');
+  if (applied.server.networkKey !== res.nextKey) throw new Error('member kept the old key');
+  if (store.isListed(applied.server)) throw new Error('rekey made the server public');
+});
+
+await t.test('joining by invite needs a plausible key', () => {
+  const bad = store.joinByInvite({ key: 'x', name: 'Nope' });
+  if (bad.ok) throw new Error('a one-character key was accepted');
+  const good = store.joinByInvite({ key: 'p_abcdefghijklmnop', name: 'Somebody Else' });
+  if (!good.ok) throw new Error(good.error);
+  if (good.server.visibility !== 'invite') throw new Error('joined server is not invite-only');
+  if (store.isListed(good.server)) throw new Error('joined server is listed');
+});
+
+await t.test('a card can never make a private server public', () => {
+  const priv = Object.values(store.state.servers).find((s) => s.name === 'Somebody Else');
+  const res = store.ingestServerCard({
+    key: priv.networkKey, name: 'Somebody Else', ownerId: 'u_owner', savedAt: Date.now(),
+    channels: [{ name: 'general', type: 'text' }], members: [{ id: 'u_owner', role: 'owner', name: 'Owner', handle: 'owner' }],
+  });
+  if (!res.ok) throw new Error('card was refused entirely');
+  if (store.isListed(priv)) throw new Error('a card turned a private server public');
+});
+
 const failed = t.finish('logic checks');
 window.close();
 process.exit(failed ? 1 : 0);

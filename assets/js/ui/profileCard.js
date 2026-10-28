@@ -3,7 +3,7 @@ import { el, escapeHtml, formatDate, formatRelative, copyToClipboard, colorFromS
 import { avatarHTML, defaultAvatar } from '../avatar.js';
 import { icon } from '../icons.js';
 import { openPopover, closePopover } from './menu.js';
-import { state } from '../store.js';
+import { state, isBlocked, toggleBlockUser, toast as storeToast } from '../store.js';
 import { toast } from './toast.js';
 
 const STATUS_LABEL = { online: 'Online', idle: 'Idle', dnd: 'Do not disturb', offline: 'Offline' };
@@ -75,6 +75,18 @@ export function openProfileCard({ anchor, user, status = null, simulated = false
         toast('Username copied', 'ok');
       },
     }, icon('copy', 15)));
+    const blocked = isBlocked(user.id);
+    actions.append(el('button', {
+      class: `btn ${blocked ? 'btn-secondary' : 'btn-danger-soft'}`,
+      type: 'button',
+      title: blocked ? 'Unblock this person' : 'Block this person',
+      onclick: () => {
+        const res = toggleBlockUser(user.id, user);
+        if (!res?.ok) { toast(res?.error || 'Could not do that', 'error'); return; }
+        closePopover();
+        storeToast(blocked ? `Unblocked ${user.displayName}` : `Blocked ${user.displayName} — their messages are hidden`, 'ok', { duration: 3200 });
+      },
+    }, icon(blocked ? 'check' : 'lock', 15), blocked ? 'Unblock' : 'Block'));
   }
 
   openPopover({ content: card, anchor, placement, className: 'profile-popover' });

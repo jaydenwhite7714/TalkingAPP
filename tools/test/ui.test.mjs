@@ -203,6 +203,99 @@ await t.test('muting a server is remembered', async () => {
   if (saved.servers?.[srv.id]?.notify !== 'mentions') throw new Error('notification level was not persisted');
 });
 
+/* ---------------------------- blocking, for real -------------------------- */
+
+await t.test('blocking from the message menu hides that person immediately', async () => {
+  const { messageMenu } = await import(`${ROOT}/assets/js/views/messages.js`);
+  const srv = store.state.servers[studio.id];
+  const ch = srv.channelIds.map((id) => store.state.channels[id]).find((c) => c.name === 'general');
+  store.selectChannel(ch.id, { serverId: srv.id });
+  await sleep(150);
+
+  store.addMessage(ch.id, store.makeMessage({
+    channelId: ch.id, userId: 'u_annoying', displayName: 'Annoying', handle: 'annoying',
+    text: 'unwanted message here', ts: Date.now(), network: true,
+  }));
+  await sleep(200);
+  if (!document.getElementById('messagesScroll').textContent.includes('unwanted message here')) {
+    throw new Error('the message did not render in the first place');
+  }
+
+  const msg = (store.state.messages[ch.id] || []).find((m) => m.userId === 'u_annoying');
+  const anchor = document.createElement('button');
+  document.body.append(anchor);
+  messageMenu(msg, anchor);
+  await sleep(60);
+  const blockItem = [...document.querySelectorAll('.menu-item')].find((n) => /Block this person/i.test(n.textContent));
+  if (!blockItem) throw new Error('no block action in the message menu');
+  blockItem.click();
+  await sleep(250);
+
+  if (document.getElementById('messagesScroll').textContent.includes('unwanted message here')) {
+    throw new Error('the blocked message is still on screen');
+  }
+  if (!document.querySelector('.blocked-notice')) throw new Error('no explanation for the hidden messages');
+  if (!store.isBlocked('u_annoying')) throw new Error('the block was not saved');
+});
+
+await t.test('the blocked tab lists them and unblocking brings the chat back', async () => {
+  const { openSettings } = await import(`${ROOT}/assets/js/views/modals.js`);
+  openSettings('blocked');
+  await sleep(200);
+  const rows = [...document.querySelectorAll('.member-admin-row')];
+  if (!rows.some((r) => /Annoying/.test(r.textContent))) throw new Error('blocked person missing from the list');
+  const unblock = [...document.querySelectorAll('.member-admin-row .btn')].find((b) => /Unblock/i.test(b.textContent));
+  if (!unblock) throw new Error('no unblock button');
+  unblock.click();
+  await sleep(250);
+  if (store.isBlocked('u_annoying')) throw new Error('still blocked');
+  if (!document.getElementById('messagesScroll').textContent.includes('unwanted message here')) {
+    throw new Error('unblocking did not restore the message');
+  }
+});
+
+await t.test('a blocked person\'s DM shows an unblock prompt instead of a text box', async () => {
+  const peer = { id: 'u_dm_blocked', displayName: 'Pushy', handle: 'pushy', avatar: { kind: 'color', color: '#eb459e' } };
+  store.state.users[peer.id] = peer;
+  const dm = store.openDM(peer.id, peer);
+  store.blockUser(peer.id, peer);
+  store.selectChannel(dm.id, { serverId: null });
+  await sleep(250);
+  const locked = document.querySelector('.composer-locked');
+  if (!locked) throw new Error('no unblock prompt appeared');
+  if (!/You blocked/i.test(locked.textContent)) throw new Error(`unexpected prompt: ${locked.textContent.slice(0, 80)}`);
+  if (document.getElementById('composerInput')) throw new Error('they still had a text box');
+  const btn = [...locked.querySelectorAll('button')].find((b) => /Unblock/i.test(b.textContent));
+  btn.click();
+  await sleep(200);
+  if (store.isBlocked(peer.id)) throw new Error('the unblock button did nothing');
+});
+
+/* ---------------------- invite-only servers, end to end -------------------- */
+
+await t.test('creating an invite-only server gives a private link and hides it from Explore', async () => {
+  const { openCreateServer } = await import(`${ROOT}/assets/js/views/modals.js`);
+  openCreateServer();
+  await sleep(150);
+  const sw = [...document.querySelectorAll('.switch')].find((n) => n.getAttribute('aria-label') === 'Invite-only server');
+  if (!sw) throw new Error('no invite-only switch in the create dialog');
+  sw.click();
+  if (sw.getAttribute('aria-checked') !== 'true') throw new Error('the switch did not turn on');
+  document.getElementById('srvName').value = 'Quiet Room';
+  const create = [...document.querySelectorAll('.modal-foot .btn')].find((b) => /Create server/i.test(b.textContent));
+  create.click();
+  await sleep(300);
+
+  const srv = Object.values(store.state.servers).find((s) => s.name === 'Quiet Room');
+  if (!srv) throw new Error('the server was not created');
+  if (store.isListed(srv)) throw new Error('an invite-only server was listed');
+  if (srv.networkKey.includes('quiet')) throw new Error('the private key leaks the name');
+  if (store.state.network[srv.networkKey]) throw new Error('it registered itself in Explore');
+  const { inviteLinkFor } = store;
+  const link = inviteLinkFor(srv);
+  if (!link.includes('?invite=')) throw new Error(`the link is not an invite link: ${link}`);
+});
+
 await t.test('no console errors were logged during the whole session', () => {
   const real = errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom/i.test(e));
   if (real.length) throw new Error(real.slice(0, 4).join(' | '));
