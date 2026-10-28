@@ -907,3 +907,105 @@ kbd.key {
   border: 1px solid rgba(255, 255, 255, .12);
 }
 .dm-item.is-blocked .dm-preview { font-style: italic; }
+
+/* ------------------------------- threads --------------------------------- */
+
+.thread-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+  max-width: 100%;
+}
+.thread-chip:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-strong, var(--border)); }
+.thread-chip .tc-ico { display: inline-flex; color: var(--accent); }
+.thread-chip .tc-count { color: var(--text-3); font-size: 12px; }
+.thread-chip.is-empty { opacity: .85; }
+.thread-chip .tc-people { color: var(--text-4, var(--text-3)); font-size: 11.5px; }
+
+.channel-item.thread-item { padding-left: 26px; font-size: 13.5px; }
+.channel-item.thread-item .ch-name { opacity: .92; }
+.channel-item.thread-item .thread-count {
+  margin-left: auto; margin-right: 6px;
+  font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+
+.thread-intro { padding: 14px 16px 6px; }
+.thread-crumb {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-3);
+  padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+.thread-crumb .tc-thread-ico { display: inline-flex; color: var(--accent); }
+.thread-crumb .grow { flex: 1; }
+.thread-parent-msg {
+  display: flex; gap: 8px; align-items: baseline;
+  margin-top: 10px; padding: 9px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-elevated);
+  border-radius: 0 8px 8px 0;
+  font-size: 13.5px; color: var(--text-2);
+}
+.thread-parent-msg .tpm-text { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+.thread-back { font-size: 12.5px; }
+
+/* --------------------------------- slowmode ------------------------------- */
+
+.composer-slowmode {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 16px 6px;
+  padding: 7px 12px;
+  font-size: 12.5px; color: var(--text-2);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.composer-slowmode .slow-note { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.composer-input.is-cooling { opacity: .6; cursor: not-allowed; }
+
+/* -------------------------------- audit log ------------------------------- */
+
+.audit-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
+.audit-row { display: flex; gap: 10px; padding: 7px 8px; border-radius: 7px; }
+.audit-row:hover { background: var(--bg-hover); }
+.audit-ico { color: var(--text-3); margin-top: 2px; display: inline-flex; }
+.audit-body { min-width: 0; }
+.audit-line { font-size: 13px; color: var(--text-2); }
+.audit-line b { color: var(--text); }
+.audit-detail { color: var(--text-3); }
+.audit-meta { font-size: 11.5px; color: var(--text-4, var(--text-3)); margin-top: 1px; }
+
+/* ------------------------------ saved messages ---------------------------- */
+
+.saved-list { display: flex; flex-direction: column; gap: 8px; }
+.saved-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--bg-elevated);
+}
+.saved-main { min-width: 0; }
+.saved-meta { font-size: 11.5px; color: var(--text-3); }
+.saved-meta b { color: var(--text-2); }
+.saved-text {
+  margin-top: 3px; font-size: 13.5px; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 460px;
+}
+
+/* quick reactions appear when you hover a message, like Discord */
+.msg-toolbar .quick-reactions { display: none; gap: 1px; }
+.message:hover .msg-toolbar .quick-reactions { display: inline-flex; }
+.quick-react {
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 4px 3px; border-radius: 6px;
+  filter: grayscale(.25); transition: transform .1s, filter .12s, background .12s;
+}
+.quick-react:hover { transform: translateY(-1px) scale(1.12); filter: none; background: var(--bg-hover); }

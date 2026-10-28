@@ -4,6 +4,7 @@ import { icon, iconHTML } from '../icons.js';
 import {
   state, activeChannel, sendMessage, editMessage, toast, setSetting,
   canPostInChannel, currentPlan, dmPeer, isBlocked, unblockUser,
+  slowmodeFor, slowmodeRemaining, threadParent, canModerateChannel,
 } from '../store.js';
 import { maxUploadBytes, planOf } from '../plans.js';
 import { bus } from '../bus.js';
@@ -22,6 +23,7 @@ let acItems = [];
 let acIndex = 0;
 let acContext = null;
 let draftChannel = null;
+let slowTimer = null;
 
 const MAX = 2000;
 
@@ -164,7 +166,9 @@ function render() {
     id: 'composerInput',
     rows: '1',
     maxlength: String(MAX),
-    placeholder: ch.type === 'dm' ? `Message @${ch.handle}` : `Message #${ch.name}`,
+    placeholder: ch.type === 'dm'
+      ? `Message @${ch.handle}`
+      : ch.type === 'thread' ? `Reply in ${ch.name}` : `Message #${ch.name}`,
     'aria-label': ch.type === 'dm' ? `Message ${ch.name}` : `Message #${ch.name}`,
     autocomplete: 'off',
     spellcheck: 'true',
@@ -177,6 +181,8 @@ function render() {
   sendBtn.addEventListener('click', submit);
 
   composer.append(tools, main, sendBtn);
+  const slowBar = slowmodeBarFor(ch);
+  if (slowBar) area.append(slowBar);
   area.append(composer);
   area.append(el('div', { class: 'composer-hint' },
     el('span', { html: `<b>Enter</b> to send` }), el('kbd', { text: 'Shift' }), el('span', { text: '+ Enter for a new line' }),
@@ -194,6 +200,48 @@ function render() {
   composer.addEventListener('drop', onDrop);
 
   onInput();
+  startSlowmodeWatch(ch, ta, sendBtn, slowBar);
+}
+
+/** A quiet note under the composer when a channel is on slowmode. */
+function slowmodeBarFor(ch) {
+  const wait = slowmodeFor(ch.id);
+  if (!wait) return null;
+  const exempt = canModerateChannel(ch.id);
+  const bar = el('div', { class: 'composer-slowmode', id: 'slowmodeBar' },
+    icon('clock', 14),
+    el('span', {
+      text: exempt
+        ? `Slowmode ${formatWait(wait)} — moderators are exempt.`
+        : `Slowmode ${formatWait(wait)} between messages.`,
+    }),
+    el('span', { class: 'grow' }),
+    el('span', { class: 'slow-note', id: 'slowNote', text: '' }),
+  );
+  return bar;
+}
+
+function formatWait(secs) {
+  if (secs < 60) return `${secs}s`;
+  if (secs % 60 === 0) return `${secs / 60} min`;
+  return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+}
+
+function startSlowmodeWatch(ch, input, sendBtn, bar) {
+  clearInterval(slowTimer);
+  if (!bar) return;
+  const tick = () => {
+    if (!document.body.contains(bar)) { clearInterval(slowTimer); return; }
+    const left = slowmodeRemaining(ch.id);
+    const note = document.getElementById('slowNote');
+    if (note) note.textContent = left > 0 ? `Wait ${left}s` : 'You can post';
+    const blocked = left > 0;
+    if (input) input.disabled = blocked;
+    if (sendBtn) sendBtn.disabled = blocked;
+    if (input) input.classList.toggle('is-cooling', blocked);
+  };
+  tick();
+  slowTimer = setInterval(tick, 1000);
 }
 
 function makeReplyBar(msg) {

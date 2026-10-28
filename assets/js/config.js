@@ -46,7 +46,7 @@ const joinName = params.get('name') || '';
 
 export const CONFIG = {
   appName: 'TalkingApp',
-  version: '2.1.0',
+  version: '2.2.0',
   room: (params.get('room') || localStorage.getItem('ta.room') || 'talkingapp-public-v1').replace(/[^a-z0-9-]/gi, '').slice(0, 40) || 'talkingapp-public-v1',
   relay: {
     candidates: parseCandidates(),

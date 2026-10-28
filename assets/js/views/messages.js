@@ -9,7 +9,8 @@ import { emojify } from '../emojis.js';
 import {
   state, toggleReaction, togglePin, deleteMessage, findMessage, markRead, toast,
   canModerateChannel, roleOf, visibleMessages, isHiddenMessage, blockedList,
-  isBlocked, toggleBlockUser,
+  isBlocked, toggleBlockUser, threadForMessage, createThread, threadReplyCount,
+  threadsForChannel, threadParent, deleteThread, isSaved, toggleSaved,
 } from '../store.js';
 import { roleChipHTML } from '../perms.js';
 import { planBadgeHTML, planForUser } from '../plans.js';
@@ -20,6 +21,11 @@ import { openEmojiPicker } from '../ui/emojiPicker.js';
 import { openLightbox } from '../ui/lightbox.js';
 import { confirmDialog } from '../ui/modal.js';
 import { openDM } from '../store.js';
+
+/** Navigate without a hard import cycle (shell.js imports this module). */
+function goToChannel(channelId) {
+  import('./shell.js').then((m) => m.goToChannel(channelId));
+}
 
 let scroller = null;
 let inner = null;
@@ -90,7 +96,11 @@ export function openChannelView(channelId) {
     return;
   }
 
-  inner.append(introNode(ch));
+  if (ch.type === 'thread') {
+    inner.append(threadHeaderNode(ch));
+  } else {
+    inner.append(introNode(ch));
+  }
 
   // People you blocked never show up here — the messages stay saved, so
   // unblocking brings them straight back.
@@ -154,6 +164,70 @@ function noChannelState() {
   wrap.querySelector('[data-action="explore"]').addEventListener('click', () => import('./modals.js').then((m) => m.openExplore()));
   wrap.querySelector('[data-action="server"]').addEventListener('click', () => import('./modals.js').then((m) => m.openCreateServer()));
   return wrap;
+}
+
+/** The strip at the top of a thread: which channel it came from, and a way out. */
+function threadHeaderNode(thread) {
+  const parent = threadParent(thread);
+  const parentMsg = thread.parentMessageId
+    ? (state.messages[thread.parentChannelId] || []).find((m) => m.id === thread.parentMessageId)
+    : null;
+  const node = el('div', { class: 'thread-intro' });
+  const crumb = el('div', { class: 'thread-crumb' },
+    el('span', { class: 'tc-thread-ico', html: iconHTML('thread', 16) }),
+    el('span', { text: thread.name }),
+    el('span', { class: 'tc-dot', text: '·' }),
+    el('button', {
+      class: 'link-btn', type: 'button',
+      onclick: () => { if (parent) goToChannel(parent.id); },
+    }, parent ? `#${parent.name}` : 'the channel'),
+    el('span', { class: 'grow' }),
+    el('button', {
+      class: 'icon-btn', type: 'button', title: 'Close thread', 'aria-label': 'Close thread',
+      onclick: () => { if (parent) goToChannel(parent.id); },
+    }, icon('close', 16)),
+  );
+  node.append(crumb);
+  if (parentMsg) {
+    node.append(el('div', { class: 'thread-parent-msg' },
+      el('b', { text: parentMsg.displayName }),
+      el('span', { class: 'tpm-text', text: plainPreview(emojify(parentMsg.text || ''), 220) }),
+    ));
+  } else if (thread.parentPreview) {
+    node.append(el('div', { class: 'thread-parent-msg' },
+      el('b', { text: thread.parentPreview.displayName }),
+      el('span', { class: 'tpm-text', text: plainPreview(emojify(thread.parentPreview.text || ''), 220) }),
+    ));
+  }
+  return node;
+}
+
+/** Navigate into a thread. */
+export function openThread(threadId) {
+  const thread = state.channels[threadId];
+  if (!thread) { toast('That thread is gone.', 'warn'); return; }
+  goToChannel(thread.id);
+}
+
+/** Open the thread on a message, creating it the first time somebody replies. */
+export function openThreadForMessage(msg) {
+  if (!msg) return;
+  const existing = msg.threadId ? state.channels[msg.threadId] : threadForMessage(msg.channelId, msg.id);
+  if (existing) return openThread(existing.id);
+  const res = createThread({ channelId: msg.channelId, messageId: msg.id });
+  if (!res.ok) { toast(res.error || 'Could not start a thread.', 'warn'); return; }
+  openThread(res.thread.id);
+  toast('Thread started — this is a side conversation that stays out of the channel.', 'ok', { duration: 3600 });
+}
+
+function toggleSave(msg, anchor) {
+  const res = toggleSaved(msg);
+  if (!res.ok) { toast(res.error || 'Could not save that.', 'warn'); return; }
+  toast(res.saved ? 'Saved — find it in Settings → Saved' : 'Removed from saved', 'ok');
+  if (anchor) {
+    const wasFocused = document.activeElement === anchor;
+    if (wasFocused) anchor.blur();
+  }
 }
 
 function introNode(ch) {
@@ -291,6 +365,27 @@ function messageNode(msg, { group = true } = {}) {
     text.append(el('span', { class: 'msg-edited', text: ' (edited)', title: formatMessageStamp(msg.editedTs) }));
   }
 
+  const thread = msg.threadId
+    ? state.channels[msg.threadId]
+    : (state.channels[msg.channelId]?.type === 'thread' ? null : threadForMessage(msg.channelId, msg.id));
+  if (thread) {
+    const replies = threadReplyCount(thread.id);
+    const participants = new Set((state.messages[thread.id] || []).map((m) => m.userId));
+    const chip = el('button', {
+      class: `thread-chip${replies ? '' : ' is-empty'}`,
+      type: 'button',
+      'data-thread': thread.id,
+      title: replies ? `${replies} repl${replies === 1 ? 'y' : 'ies'} — open thread` : 'Open thread',
+      onclick: (e) => { e.stopPropagation(); openThread(thread.id); },
+    },
+      el('span', { class: 'tc-ico', html: iconHTML('reply', 14) }),
+      el('span', { text: thread.name }),
+      el('span', { class: 'tc-count', text: replies ? `${replies} repl${replies === 1 ? 'y' : 'ies'}` : 'No replies yet' }),
+      participants.size > 1 ? el('span', { class: 'tc-people', text: `${participants.size} people` }) : null,
+    );
+    body.append(chip);
+  }
+
   if (msg.reactions && Object.keys(msg.reactions).length) {
     body.append(reactionBar(msg));
   }
@@ -344,15 +439,29 @@ function decorateContent(root, msg) {
   }
 }
 
+/** Turn reactor ids into the names people actually recognise. */
+function reactorNames(ids) {
+  return ids.map((id) => {
+    if (id === state.self?.id) return 'You';
+    const known = state.users[id] || state.peers[id]?.user;
+    return known?.displayName || 'Someone';
+  });
+}
+
 function reactionBar(msg) {
   const bar = el('div', { class: 'reactions' });
   const mine = state.self?.id;
   for (const [emoji, users] of Object.entries(msg.reactions || {})) {
     if (!users.length) continue;
+    const names = reactorNames(users);
+    const title = names.length > 5
+      ? `${emoji} ${names.slice(0, 5).join(', ')} and ${names.length - 5} more`
+      : `${emoji} ${names.join(', ')}${names.length === 1 ? ' reacted' : ' reacted'}`;
     const btn = el('button', {
       class: `reaction${users.includes(mine) ? ' mine' : ''}`,
       type: 'button',
-      title: `${users.length} reaction${users.length === 1 ? '' : 's'}`,
+      title,
+      'aria-label': title,
       'data-emoji': emoji,
       onclick: (e) => { e.stopPropagation(); toggleReaction(msg.channelId, msg.id, emoji); },
     }, el('span', { class: 'r-emoji', text: emoji }), el('span', { text: String(users.length) }));
@@ -377,6 +486,14 @@ function reactionBar(msg) {
 function toolbar(msg) {
   const isSelf = msg.userId === state.self?.id;
   const bar = el('div', { class: 'msg-toolbar' });
+  const quick = el('span', { class: 'quick-reactions' });
+  for (const emoji of ['👍', '😂', '❤️', '🎉']) {
+    quick.append(el('button', {
+      type: 'button', class: 'quick-react', title: `React with ${emoji}`, 'aria-label': `React with ${emoji}`,
+      onclick: (e) => { e.stopPropagation(); toggleReaction(msg.channelId, msg.id, emoji); },
+    }, emoji));
+  }
+  bar.append(quick);
   bar.append(el('button', {
     type: 'button', title: 'Add reaction', 'aria-label': 'Add reaction',
     onclick: (e) => openEmojiPicker({
@@ -388,6 +505,17 @@ function toolbar(msg) {
     type: 'button', title: 'Reply', 'aria-label': 'Reply',
     onclick: () => { import('./composer.js').then((m) => m.setReplyTo(msg)); },
   }, icon('reply', 17)));
+  if (state.channels[msg.channelId]?.type !== 'thread') {
+    bar.append(el('button', {
+      type: 'button', title: 'Reply in thread', 'aria-label': 'Reply in thread',
+      onclick: () => openThreadForMessage(msg),
+    }, icon('thread', 17)));
+  }
+  bar.append(el('button', {
+    type: 'button', title: isSaved(msg.id) ? 'Remove from saved' : 'Save message',
+    'aria-label': isSaved(msg.id) ? 'Remove from saved' : 'Save message',
+    onclick: (e) => toggleSave(msg, e.currentTarget),
+  }, icon(isSaved(msg.id) ? 'bookmarkFilled' : 'bookmark', 16)));
   if (isSelf) {
     bar.append(el('button', {
       type: 'button', title: 'Edit', 'aria-label': 'Edit message',
@@ -408,6 +536,13 @@ export function messageMenu(msg, anchor) {
     { label: 'Add reaction', icon: 'smile', onClick: () => openEmojiPicker({ anchor, onPick: (e) => toggleReaction(msg.channelId, msg.id, e) }) },
     { label: 'Reply', icon: 'reply', onClick: () => import('./composer.js').then((m) => m.setReplyTo(msg)) },
     { label: 'Copy text', icon: 'copy', onClick: async () => { await copyToClipboard(msg.text); toast('Message copied', 'ok'); } },
+    { label: isSaved(msg.id) ? 'Remove from saved' : 'Save message', icon: isSaved(msg.id) ? 'bookmarkFilled' : 'bookmark',
+      onClick: () => toggleSave(msg) },
+    state.channels[msg.channelId]?.type === 'thread' ? null : {
+      label: msg.threadId || threadForMessage(msg.channelId, msg.id) ? 'Open thread' : 'Create thread',
+      icon: 'thread',
+      onClick: () => openThreadForMessage(msg),
+    },
     { sep: true },
     (isSelf || canModerate) ? {
       label: msg.pinned ? 'Unpin message' : 'Pin message',
@@ -451,6 +586,7 @@ export function messageMenu(msg, anchor) {
       },
     });
     if (canModerate) {
+      items.push({ label: 'Reply in thread', icon: 'thread', onClick: () => openThreadForMessage(msg) });
       items.push({ label: 'Delete as moderator', icon: 'trash', danger: true, onClick: async () => {
         const ok = await confirmDialog({
           title: 'Delete this message?',
