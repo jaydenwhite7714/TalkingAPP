@@ -6,15 +6,17 @@
 //     Chromebook with the same username + password restores servers, channels,
 //     history, DMs, settings and profile.
 
-import { state, snapshotState, applySnapshot } from './store.js';
+import { state, snapshotState, applySnapshot, currentPlan } from './store.js';
+import { limitsFor } from './plans.js';
 import { deriveVaultKey, encryptJson, decryptJson, readAccount, VAULT_KEY } from './account.js';
 import { storage } from './util.js';
 import { net } from './net.js';
 import { bus } from './bus.js';
 
 const CHUNK = 11000;          // characters of base64 per relay message
-const MAX_CHUNKS = 120;       // ~1.3 MB sealed ceiling
+const MAX_CHUNKS = 640;       // hard ceiling, whatever the plan says
 const MAX_ATTACHMENT_TOTAL = 620_000;
+const SAFETY = 400;           // keep a little headroom under the chunk ceiling
 
 /* ------------------------------- compression ------------------------------ */
 
@@ -42,15 +44,77 @@ async function inflate(payload) {
 
 /* --------------------------------- sealing -------------------------------- */
 
+/**
+ * Fit a snapshot into what the plan allows. Big histories and pictures are the
+ * first things to go, newest messages last — so a cloud copy never silently
+ * fails and always keeps the conversation you actually care about.
+ */
+function shrinkSnapshot(snapshot, round) {
+  const copy = JSON.parse(JSON.stringify(snapshot));
+  const keep = [40, 24, 12, 6, 3][Math.min(round, 4)];
+  let droppedAttachments = 0;
+  for (const [channelId, list] of Object.entries(copy.messages || {})) {
+    const newest = list.slice(-keep);
+    for (const m of list) {
+      if (!newest.includes(m)) continue;
+      if (m.attachment?.src && round >= 1) {
+        m.attachment = null;
+        m.attachmentDropped = true;
+        droppedAttachments++;
+      }
+    }
+    copy.messages[channelId] = (round >= 1 ? newest : list).map((m) => {
+      if (round === 0 && m.attachment?.src && (m.attachment.src || '').length > 120_000) {
+        droppedAttachments++;
+        return { ...m, attachment: null, attachmentDropped: true };
+      }
+      return m;
+    });
+  }
+  copy.trimmed = true;
+  copy.trimmedRound = round;
+  copy.droppedAttachments = (snapshot.droppedAttachments || 0) + droppedAttachments;
+  return copy;
+}
+
+/** Roughly how many characters the sealed blob will occupy. */
+function sealedSize(packed) {
+  return packed.body.length + 260;
+}
+
 export async function sealSnapshot(password) {
   const account = readAccount();
   if (!account) throw new Error('No account on this device.');
-  const snapshot = snapshotState();
-  const json = JSON.stringify(snapshot);
-  const packed = await deflate(json);
+  const plan = currentPlan();
+  const limits = limitsFor(plan.id);
+  const budget = Math.min(limits.cloudKB * 1024, Math.min(limits.cloudChunks, MAX_CHUNKS) * CHUNK - SAFETY);
+
+  let snapshot = snapshotState();
+  let packed = await deflate(JSON.stringify(snapshot));
+  let dropped = 0;
+  for (let round = 0; round < 5 && sealedSize(packed) > budget; round++) {
+    const before = snapshot;
+    snapshot = shrinkSnapshot(before, round);
+    const next = await deflate(JSON.stringify(snapshot));
+    // stop if shrinking is not helping any more
+    if (sealedSize(next) >= sealedSize(packed) && round > 0) break;
+    packed = next;
+    dropped = snapshot.droppedAttachments || 0;
+  }
+
   const key = await deriveVaultKey(password, account.salt, account.iterations);
   const sealed = await encryptJson(key, packed);
-  return { v: 1, handle: account.handle, savedAt: Date.now(), iterations: account.iterations, salt: account.salt, ...sealed };
+  return {
+    v: 1,
+    handle: account.handle,
+    savedAt: Date.now(),
+    iterations: account.iterations,
+    salt: account.salt,
+    plan: plan.id,
+    trimmed: Boolean(snapshot.trimmed),
+    droppedAttachments: dropped,
+    ...sealed,
+  };
 }
 
 export async function openSealed(password, sealed) {
@@ -76,8 +140,9 @@ function chunksOf(text) {
 export async function saveVaultToCloud(password) {
   const sealed = await sealSnapshot(password);
   const blob = JSON.stringify(sealed);
-  let parts = chunksOf(blob);
-  if (parts.length > MAX_CHUNKS) throw new Error('Your data is too large for the cloud copy — export a file instead.');
+  const parts = chunksOf(blob);
+  const allowed = Math.min(limitsFor(currentPlan().id).cloudChunks, MAX_CHUNKS);
+  if (parts.length > allowed) throw new Error('Your data is too large for the cloud copy — export a file instead.');
   const sent = net.publishVault({ handle: sealed.handle, parts, total: parts.length, savedAt: sealed.savedAt });
   storage.set(VAULT_KEY, { handle: sealed.handle, sealed, savedAt: sealed.savedAt });
   bus.emit('vault:saved', { savedAt: sealed.savedAt, size: blob.length, transports: sent });

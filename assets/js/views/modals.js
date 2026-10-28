@@ -7,7 +7,12 @@ import {
   updateSelf, setSetting, setTheme, setAccent, dmList, openDM, ensureDMChannelForUser, markRead,
   pinnedMessages, toast, searchAll, unreadCount, joinNetworkCommunity, signOut, resetEverything,
   flush, persistNow, networkKeyFor, activeChannel, canManageServer,
+  memberList, setMemberRole, currentPlan, setPlan, canAssignRolesIn, forgetServer,
+  isServerOwner, roleOf, setServerNotify,
 } from '../store.js';
+import { PLANS, DEMO_NOTE, planOf, planBadgeHTML, limitsFor } from '../plans.js';
+import { roleChipHTML, assignableRoles, roleRecord } from '../perms.js';
+import { cardFor, applyPendingForServer } from '../shared.js';
 import { readAccount, checkPassword, changeAccountPassword } from '../account.js';
 import { sessionPassword } from '../session.js';
 import { downloadBackup, readBackupFile, saveVaultToCloud, restoreSnapshot, localVault } from '../vault.js';
@@ -137,6 +142,15 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
   const isEdit = Boolean(existing);
   const nameInput = el('input', { class: 'input', maxlength: '28', value: existing?.name || preselectName, placeholder: 'new-channel', autofocus: true });
   const topicInput = el('input', { class: 'input', maxlength: '140', value: existing?.topic || '', placeholder: 'What is this channel for?' });
+  const categoryInput = el('input', { class: 'input', maxlength: '24', value: existing?.category || '', placeholder: 'e.g. Start here (optional)' });
+  const announceSwitch = el('button', {
+    class: 'switch', type: 'button', role: 'switch',
+    'aria-checked': String(existing?.type === 'announcement'),
+    onclick: (e) => {
+      const on = e.currentTarget.getAttribute('aria-checked') !== 'true';
+      e.currentTarget.setAttribute('aria-checked', String(on));
+    },
+  });
   const err = el('div', { class: 'form-error', hidden: true });
   const preview = el('div', { class: 'row', style: { gap: '7px', color: 'var(--text-2)', fontSize: '14px', padding: '8px 0 2px' } });
   const updatePreview = () => {
@@ -158,6 +172,14 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
     ),
     el('div', { class: 'form-group' },
       el('label', { class: 'form-label', text: 'Channel topic' }), topicInput),
+    el('div', { class: 'form-group' },
+      el('label', { class: 'form-label', text: 'Category' }), categoryInput,
+      el('div', { class: 'form-help', text: 'Channels in the same category are grouped together in the sidebar.' })),
+    el('div', { class: 'setting-row', style: { borderTop: '1px solid var(--border)' } },
+      el('div', { class: 'sr-text' },
+        el('div', { class: 'sr-title', text: 'Announcement channel' }),
+        el('div', { class: 'sr-desc', text: 'Only moderators, admins and the owner can post. Everyone else reads.' })),
+      announceSwitch),
     err,
   );
 
@@ -172,9 +194,10 @@ export function openCreateChannel(server, existing = null, { preselectName = '' 
     el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => ref.close() }, 'Cancel'),
     el('button', {
       class: 'btn btn-primary', type: 'button', onclick: () => {
+        const type = announceSwitch.getAttribute('aria-checked') === 'true' ? 'announcement' : 'text';
         const res = isEdit
-          ? updateChannel(existing.id, { name: nameInput.value, topic: topicInput.value })
-          : createChannel(server.id, nameInput.value, topicInput.value);
+          ? updateChannel(existing.id, { name: nameInput.value, topic: topicInput.value, category: categoryInput.value, type })
+          : createChannel(server.id, nameInput.value, topicInput.value, { category: categoryInput.value, type });
         if (!res.ok) {
           err.hidden = false;
           err.textContent = res.error || 'Could not save that channel.';
@@ -343,6 +366,58 @@ export function openServerSettings(server) {
   }
   nameInput.addEventListener('input', updateHolder);
 
+  const people = el('div', { class: 'member-admin' });
+  function renderPeople() {
+    people.replaceChildren();
+    const canAssign = canAssignRolesIn(server);
+    const roles = canAssign ? assignableRoles(server, state.self?.id) : [];
+    const list = memberList(server);
+    if (!list.length) {
+      people.append(el('div', { class: 'members-empty', text: 'Nobody else has shown up yet. Invite someone and they will appear here with their role.' }));
+      return;
+    }
+    for (const m of list) {
+      const row = el('div', { class: 'member-admin-row' },
+        el('span', { class: 'ma-avatar', html: avatarHTML({ displayName: m.name, avatar: defaultAvatar(m.name), accentColor: '#5865f2' }, { size: 30 }) }),
+        el('div', { class: 'ma-name' },
+          el('b', { text: m.name }),
+          el('span', { text: `@${m.handle}` })),
+        el('span', { class: 'ma-role', html: roleChipHTML(m.role) }),
+      );
+      if (canAssign && m.role !== 'owner' && m.id !== state.self?.id) {
+        const options = roles.includes(m.role) ? roles : [m.role, ...roles];
+        const select = el('select', {
+          class: 'input input-select input-sm',
+          'aria-label': `Role for ${m.name}`,
+          title: `${m.name}'s role`,
+          onchange: (e) => {
+            const res = setMemberRole(server.id, m.id, e.target.value);
+            if (!res.ok) { toast(res.error, 'error'); renderPeople(); return; }
+            toast(`${m.name} is now ${roleRecord(res.role.id).label}`, 'ok');
+            renderPeople();
+          },
+        }, ...options.map((r) => el('option', {
+          value: r,
+          text: roleRecord(r).label,
+          selected: r === m.role,
+        })));
+        row.append(select);
+      } else if (canAssign && m.id === state.self?.id) {
+        row.append(el('span', { class: 'pill', text: 'You' }));
+      }
+      people.append(row);
+    }
+  }
+  renderPeople();
+
+  const notifySelect = el('select', {
+    class: 'input input-select input-sm',
+    'aria-label': 'Notification level',
+    onchange: (e) => setServerNotify(server.id, e.target.value),
+  },
+    ...[['all', 'All messages'], ['mentions', 'Only @mentions'], ['none', 'Muted']]
+      .map(([value, label]) => el('option', { value, text: label, selected: (server.notify || 'all') === value })));
+
   const content = el('div', { class: 'modal-body pad' },
     holder,
     el('div', { class: 'form-group', style: { marginTop: '16px' } },
@@ -357,6 +432,15 @@ export function openServerSettings(server) {
       publicSwitch),
     el('div', { class: 'setting-row' },
       el('div', { class: 'sr-text' },
+        el('div', { class: 'sr-title', text: 'Notifications for you' }),
+        el('div', { class: 'sr-desc', text: 'Muted servers stay quiet — the unread badge still counts.' })),
+      notifySelect),
+    el('div', { class: 'setting-block' },
+      el('div', { class: 'sr-title', text: `People & roles — ${memberList(server).length}` }),
+      el('div', { class: 'sr-desc', style: { marginBottom: '10px' }, text: 'Roles decide who can change things. Only the owner can hand out Admin.' }),
+      people),
+    el('div', { class: 'setting-row' },
+      el('div', { class: 'sr-text' },
         el('div', { class: 'sr-title', text: 'Network key' }),
         el('div', { class: 'sr-desc', text: `${networkKeyFor(server.name)} — servers with the same key share one conversation across browsers.` })),
       el('button', {
@@ -368,7 +452,7 @@ export function openServerSettings(server) {
   const footer = el('div', { class: 'modal-foot spread' },
     el('button', {
       class: 'btn btn-danger-soft', type: 'button',
-      onclick: () => { ref.close(); server.isStarter || server.isRemote ? hideServer(server) : deleteServerFlow(server); },
+      onclick: () => { ref.close(); isServerOwner(server) ? deleteServerFlow(server) : hideServer(server); },
     }, icon('logout', 15), server.isStarter || server.isRemote ? 'Leave' : 'Delete server'),
     el('div', { class: 'row', style: { gap: '9px' } },
       el('button', { class: 'btn btn-ghost', type: 'button', onclick: () => ref.close() }, 'Cancel'),
@@ -397,19 +481,40 @@ function ownerNameOf(server) {
 /** Read-only view for servers you did not create. */
 export function openServerInfo(server) {
   const owner = server.ownerId ? state.users[server.ownerId] : null;
-  const ownerLabel = owner?.displayName || (server.isRemote ? 'another member' : 'the TalkingApp team');
+  const ownerLabel = owner?.displayName || server.ownerName || (server.isRemote ? 'another member' : 'the TalkingApp team');
+  const myRole = roleRecord(roleOf(server, state.self?.id));
+  const notifyLabel = { all: 'All messages', mentions: 'Only @mentions', none: 'Muted' };
+  const notifyRow = el('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap', marginTop: '10px' } });
+  for (const level of ['all', 'mentions', 'none']) {
+    notifyRow.append(el('button', {
+      class: `btn btn-sm ${((server.notify || 'all') === level) ? 'btn-primary' : 'btn-secondary'}`, type: 'button',
+      onclick: (e) => {
+        setServerNotify(server.id, level);
+        notifyRow.querySelectorAll('button').forEach((b) => b.classList.replace('btn-primary', 'btn-secondary'));
+        e.currentTarget.classList.replace('btn-secondary', 'btn-primary');
+        toast(`Notifications: ${notifyLabel[level]}`, 'ok', { duration: 1800 });
+      },
+    }, notifyLabel[level]));
+  }
   const content = el('div', { class: 'modal-body pad' },
     el('div', { class: 'sync-card' },
       el('div', { class: 'sync-ico', html: iconHTML('lock', 18) }),
       el('div', {},
         el('b', { text: `Owned by ${ownerLabel}` }),
-        el('span', { text: 'Only the owner can rename this server, change its icon, or add and remove channels.' }))),
+        el('span', { text: 'Only the owner can rename this server, change its icon, or add and remove channels. Everything here is read-only for you.' }))),
     el('div', { class: 'kv-list' },
       el('div', {}, el('span', { text: 'Name' }), el('b', { text: server.name })),
+      el('div', {}, el('span', { text: 'Your role' }), el('b', { text: myRole.label })),
+      el('div', {}, el('span', { text: 'Members' }), el('b', { text: String(memberList(server).length) })),
       el('div', {}, el('span', { text: 'Channels' }), el('b', { text: String(server.channelIds.length) })),
       el('div', {}, el('span', { text: 'Network key' }), el('b', { text: server.networkKey })),
       el('div', {}, el('span', { text: 'Type' }), el('b', { text: server.isRemote ? 'network community' : server.isStarter ? 'official' : 'private' })),
     ),
+    server.desc ? el('p', { style: { marginTop: '12px', fontSize: '13px', lineHeight: '1.55', color: 'var(--text-2)' }, text: server.desc }) : null,
+    el('div', { class: 'setting-block', style: { marginTop: '14px' } },
+      el('div', { class: 'sr-title', text: 'Notifications for this server' }),
+      el('div', { class: 'sr-desc', text: 'Muting stops sounds and pop-ups; the unread count still works.' }),
+      notifyRow),
     server.desc ? el('p', { class: 'muted', style: { marginTop: '12px', fontSize: '13px', lineHeight: '1.55' }, text: server.desc }) : null,
     el('div', { class: 'tip-card', style: { marginTop: '12px' } },
       el('div', { class: 'tip-ico', html: iconHTML('userPlus', 15) }),
@@ -427,7 +532,7 @@ export function openServerInfo(server) {
 }
 
 export function deleteServerFlow(server) {
-  if (!canManageServer(server)) {
+  if (!isServerOwner(server)) {
     toast(`Only ${ownerNameOf(server)} can delete this server.`, 'warn');
     return;
   }
@@ -447,13 +552,13 @@ export function hideServer(server) {
   confirmDialog({
     title: `Leave ${server.name}?`,
     body: server.isRemote
-      ? 'You will stop seeing messages from this community. You can join again from Explore.'
-      : 'This starter server will be removed from your list. You can re-add it any time from Explore.',
+      ? 'You will stop seeing messages from this community on this device. You can join again from Explore — your history comes back with it.'
+      : 'This starter server leaves your list on this device. You can re-add it any time from Explore.',
     confirmLabel: 'Leave',
     danger: true,
   }).then((ok) => {
     if (!ok) return;
-    deleteServer(server.id);
+    forgetServer(server.id);
     toast(`You left ${server.name}`, 'ok');
   });
 }
@@ -510,22 +615,33 @@ export function openExplore() {
       const grid = el('div', { class: 'explore-grid' });
       for (const c of communities) {
         const members = c.peers?.size || 0;
+        const info = cardFor(c.key);
+        const name = info?.name || c.name;
+        const desc = info?.desc || c.topic || 'A community on the TalkingApp network.';
+        const channelCount = info?.channels?.length || c.channels?.size || 1;
+        const owner = info?.ownerName ? ` · owned by ${info.ownerName}` : '';
         const card = el('div', { class: 'explore-card' });
         card.innerHTML = `
           <div class="explore-card-top">
-            ${serverIconHTML({ name: c.name, color: colorFromString(c.key, 55) }, { size: 40 })}
-            <div class="grow"><h4>${escapeHtml(c.name)}</h4>
-            <div style="font-size:11.5px;color:var(--text-3)">${c.channels?.size || 1} channels · ${members} online</div></div>
+            ${serverIconHTML({ name, color: info?.color || colorFromString(c.key, 55), emoji: info?.emoji || null }, { size: 40 })}
+            <div class="grow"><h4>${escapeHtml(name)}</h4>
+            <div style="font-size:11.5px;color:var(--text-3)">${channelCount} channel${channelCount === 1 ? '' : 's'} · ${members} online${escapeHtml(owner)}</div></div>
           </div>
-          <p>${escapeHtml(c.topic || 'A community on the TalkingApp network.')}</p>
-          <div class="ec-foot"><span class="pill green"><i></i>live</span><span class="grow"></span><button class="btn btn-sm btn-primary" type="button">Join</button></div>`;
+          <p>${escapeHtml(desc)}</p>
+          <div class="ec-foot"><span class="pill green"><i></i>${info ? 'live · history kept' : 'live'}</span><span class="grow"></span><button class="btn btn-sm btn-primary" type="button">Join</button></div>`;
         card.querySelector('button').addEventListener('click', () => {
-          const res = joinNetworkCommunity({ name: c.name, key: c.key, topic: c.topic, channels: [...(c.channels || [])] });
+          const res = joinNetworkCommunity({
+            name: c.name,
+            key: c.key,
+            channels: [...(c.channels || [])],
+            card: cardFor(c.key),
+          });
           if (res.ok) {
+            const history = applyPendingForServer(c.key);
             closeAllModals();
             goToServer(res.server.id);
             bus.emit('community:joined', { server: res.server });
-            toast(`Joined ${res.server.name}`, 'party');
+            toast(`Joined ${res.server.name}${history ? ` — ${history} message${history === 1 ? '' : 's'} of history` : ''}`, 'party');
           }
         });
         grid.append(card);
@@ -738,6 +854,7 @@ const NAV = [
   { id: 'account', label: 'My account', icon: 'user' },
   { id: 'backup', label: 'Backup & sync', icon: 'uploadCloud' },
   { id: 'profile', label: 'Profile', icon: 'edit' },
+  { id: 'plans', label: 'Plans', icon: 'sparkle' },
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'notifications', label: 'Notifications', icon: 'bell' },
   { id: 'network', label: 'Network', icon: 'wifi' },
@@ -778,6 +895,7 @@ export function openSettings(tab = MODAL_TAB.lastSettingsTab || 'account') {
     if (id === 'account') content.append(accountTab());
     else if (id === 'backup') content.append(backupTab());
     else if (id === 'profile') content.append(profileTab());
+    else if (id === 'plans') content.append(plansTab());
     else if (id === 'appearance') content.append(appearanceTab());
     else if (id === 'notifications') content.append(notificationsTab());
     else if (id === 'network') content.append(networkTab());
@@ -975,9 +1093,10 @@ function backupTab() {
       el('div', { class: 'sr-title', text: 'How it works' }),
       el('ul', { class: 'bullets' },
         el('li', { text: 'Your data is sealed with AES-256-GCM using a key derived from your password (PBKDF2, 150k rounds).' }),
-        el('li', { text: 'The sealed copy is published to the relay as retained messages, so a new device can pick it up even if nobody else is online.' }),
+        el('li', { text: `The sealed copy is published to the relay as retained messages, so a new device can pick it up even if nobody else is online. Your ${currentPlan().name} plan allows about ${Math.round(currentPlan().limits.cloudKB / 102.4) / 10} MB.` }),
         el('li', { text: 'The password itself is never stored, sent, or derivable from the copy.' }),
-        el('li', { text: 'Pictures that would bloat the copy are dropped from it; your local device keeps them.' })),
+        el('li', { text: 'If a copy gets too big it is trimmed to fit — oldest pictures and messages first, newest kept. Nothing is deleted from this device.' }),
+        el('li', { text: 'Shared channels are also kept as text-only history on the relay, so a new device sees the conversation before the copy even arrives.' })),
     ),
     el('div', { class: 'setting-block' },
       el('div', { class: 'sr-title', text: 'Move to another computer' }),
@@ -1114,6 +1233,65 @@ function accentRow() {
     }));
   }
   return row;
+}
+
+/* -------------------------------- plans tab ------------------------------ */
+
+function plansTab() {
+  const current = currentPlan();
+  const owned = Object.values(state.servers).filter((srv) => srv.ownerId === state.self?.id).length;
+  const wrap = el('div', {});
+  const grid = el('div', { class: 'plan-grid' });
+
+  for (const plan of PLANS) {
+    const isCurrent = plan.id === current.id;
+    const card = el('div', { class: `plan-card${isCurrent ? ' is-current' : ''}`, style: { '--plan-color': plan.badge.color } });
+    card.append(
+      el('div', { class: 'plan-head' },
+        el('div', {},
+          el('b', { text: plan.name }),
+          el('span', { class: 'plan-price', html: `<b>${plan.price}</b> <span>${plan.cadence}</span>` })),
+        isCurrent ? el('span', { class: 'plan-current', text: 'Your plan' }) : null),
+      el('p', { class: 'plan-tagline', text: plan.tagline }),
+      el('ul', { class: 'plan-perks' }, ...plan.perks.map((p) => el('li', { text: p }))),
+      el('div', { class: 'plan-foot' },
+        el('span', { class: 'plan-limit', text: `${limitsFor(plan.id).servers} servers · ${limitsFor(plan.id).uploadMB} MB uploads` }),
+        isCurrent
+          ? el('span', { class: 'pill', text: 'Active' })
+          : el('button', {
+            class: `btn btn-sm ${plan.id === 'free' ? 'btn-secondary' : 'btn-primary'}`, type: 'button',
+            onclick: () => {
+              const res = setPlan(plan.id);
+              if (!res.ok) { toast(res.error, 'error'); return; }
+              toast(`You are on ${plan.name} now`, 'party', { duration: 3200 });
+              closeAllModals();
+              openSettings('plans');
+            },
+          }, plan.id === 'free' ? 'Switch to Free' : `Get ${plan.name}`)),
+    );
+    grid.append(card);
+  }
+
+  wrap.append(
+    el('h3', { text: 'Plans' }),
+    el('p', { class: 'sc-sub', text: 'A simple tier system for bigger uploads, more servers and a badge next to your name.' }),
+    el('div', { class: 'sync-card' },
+      el('div', { class: 'sync-ico', html: iconHTML('sparkle', 18) }),
+      el('div', { style: { flex: '1', minWidth: '0' } },
+        el('b', { text: `${current.name} plan · ${owned} of ${current.limits.servers} servers used` }),
+        el('span', { text: DEMO_NOTE })),
+      el('span', { class: 'sync-state', text: current.badge.label })),
+    grid,
+    el('div', { class: 'setting-block', style: { marginTop: '16px' } },
+      el('div', { class: 'sr-title', text: 'What a plan changes' }),
+      el('ul', { class: 'bullets' },
+        el('li', { text: 'How many servers you can create, and how many channels each one gets.' }),
+        el('li', { text: 'The largest picture or GIF you can upload — enforced before anything is sent.' }),
+        el('li', { text: 'How much history travels in the shared log, so new devices see more of it.' }),
+        el('li', { text: 'A badge on your name, visible to everyone in your servers.' })),
+      el('div', { class: 'sr-desc', style: { marginTop: '10px' }, text: 'Your plan is part of your saved account, so it moves to a new Chromebook with everything else.' })),
+  );
+  return wrap;
 }
 
 function appearanceTab() {
@@ -1311,10 +1489,19 @@ function aboutTab() {
       el('div', {}, el('b', { text: 'Made by Jayden' }),
         el('span', { text: 'Designed and built by hand — no frameworks, no tracking, no ads.' }))),
     el('div', { class: 'setting-block' },
+      el('div', { class: 'sr-title', text: "What's new in this build" }),
+      el('ul', { class: 'bullets' },
+        el('li', { text: 'Roles: owner, admin, moderator, member and read-only — checked before anything is changed, and on the wire.' }),
+        el('li', { text: 'Shared history: channel digests are retained by the relay, so a new device sees the conversation.' }),
+        el('li', { text: 'Server cards: joining by invite brings the real name, icon, categories and member roles.' }),
+        el('li', { text: 'Plans: Free, Plus and Studio with bigger uploads, more servers and a badge.' }),
+        el('li', { text: 'Cloud copies now trim themselves to fit instead of failing, and note what was left out.' }))),
+    el('div', { class: 'setting-block' },
       el('div', { class: 'kv-list' },
         el('div', {}, el('span', { text: 'Version' }), el('b', { text: CONFIG.version })),
+        el('div', {}, el('span', { text: 'Plan' }), el('b', { text: currentPlan().name })),
         el('div', {}, el('span', { text: 'Build' }), el('b', { text: 'static · github pages' })),
-        el('div', {}, el('span', { text: 'Storage' }), el('b', { text: 'this browser only' })),
+        el('div', {}, el('span', { text: 'Storage' }), el('b', { text: 'this browser, plus your sealed cloud copy' })),
         el('div', {}, el('span', { text: 'Messages' }), el('b', { text: 'relayed publicly, not stored on a server' })),
       )),
     el('div', { class: 'row', style: { gap: '8px', marginTop: '12px', flexWrap: 'wrap' } },

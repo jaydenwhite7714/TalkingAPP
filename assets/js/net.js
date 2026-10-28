@@ -378,6 +378,7 @@ export const net = {
       handle: p.handle,
       accentColor: p.accentColor,
       avatar: av,
+      plan: p.plan || 'free',
       bio: (p.bio || '').slice(0, 190),
     };
   },
@@ -446,6 +447,15 @@ export const net = {
   handlePacket(raw, transport) {
     // chunks stay well under this; whole-vault frames can be a little larger
     if (!raw || raw.length > 120000) return;
+    // the raw relay forwards retained frames wrapped in their topic: unwrap and
+    // treat the payload exactly as if we had just received it
+    if (raw.startsWith('{"__ta_retain"')) {
+      try {
+        const frame = JSON.parse(raw);
+        if (frame?.__ta_retain && frame.payload) this.handlePacket(String(frame.payload), transport);
+      } catch {}
+      return;
+    }
     let p;
     try { p = JSON.parse(raw); } catch { return; }
     if (!p || p.v !== 1 || !p.from?.id) return;
@@ -458,6 +468,8 @@ export const net = {
       else if (p.kind === 'vault') bus.emit('net:vault', p);
       else if (p.kind === 'handle-check') bus.emit('net:handle-check', p);
       else if (p.kind === 'handle-taken') bus.emit('net:handle-taken', p);
+      else if (p.kind === 'log') bus.emit('net:log', p);
+      else if (p.kind === 'server-card') bus.emit('net:server-card', p);
       return;
     }
     if (p.from.id === this.profile?.id && p.sid !== this.sid) {
@@ -589,6 +601,64 @@ export const net = {
         if (t.sendRetained?.(`vault/${handle}/${part}`, json) && t.state === 'online') sent++;
       }
     });
+    return sent;
+  },
+
+  /**
+   * Publish a compact history digest for one channel as a retained frame.
+   * Retained frames are replayed to anyone who connects later, so a brand-new
+   * device sees the conversation without needing another person online.
+   */
+  publishChannelLog({ key, channel, entries, removed, savedAt }) {
+    if (!key || !channel) return 0;
+    const body = this.packRetained({
+      kind: 'log',
+      key,
+      channel,
+      entries,
+      removed,
+      savedAt: savedAt || Date.now(),
+    });
+    return this.sendSystemRetained(`log/${key}/${channel}`, body);
+  },
+
+  /** Publish what a server looks like, so members see its real name and icon. */
+  publishServerCard(card) {
+    if (!card?.key) return 0;
+    const body = this.packRetained({ kind: 'server-card', card });
+    return this.sendSystemRetained(`srv/${card.key}`, body);
+  },
+
+  /** Build a system envelope and cap it so brokers and the relay both accept it. */
+  packRetained(env) {
+    const packet = {
+      v: 1,
+      sid: 'log',
+      id: randId(12),
+      ts: Date.now(),
+      system: true,
+      from: { id: 'log', displayName: 'History' },
+      ...env,
+    };
+    let json = JSON.stringify(packet);
+    // digests carry a message list; keep the newest ones if it grows too big
+    while (json.length > 96000 && Array.isArray(packet.entries) && packet.entries.length > 1) {
+      packet.entries = packet.entries.slice(1);
+      json = JSON.stringify(packet);
+    }
+    return json;
+  },
+
+  sendSystemRetained(topic, json) {
+    // Retained frames are replayed by every broker that stores them, so two
+    // copies is plenty: enough for redundancy without flooding the room.
+    let sent = 0;
+    for (const t of this.transports) {
+      if (t.kind === 'local' || t.state !== 'online' || sent >= 2) continue;
+      try {
+        if (t.sendRetained?.(topic, json)) sent++;
+      } catch {}
+    }
     return sent;
   },
 
